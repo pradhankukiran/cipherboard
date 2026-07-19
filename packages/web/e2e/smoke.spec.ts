@@ -3,6 +3,8 @@ import { expect, test, type Page } from "@playwright/test";
 function captureWs(page: Page) {
   const sent: string[] = [];
   const received: string[] = [];
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
   page.on("websocket", (socket) => {
     socket.on("framesent", ({ payload }) => {
       try {
@@ -30,7 +32,7 @@ function captureWs(page: Page) {
       }
     });
   });
-  return { sent, received };
+  return { sent, received, pageErrors };
 }
 
 async function createHost(page: Page, name: string) {
@@ -129,7 +131,7 @@ test.describe("cipherboard flows", () => {
       const hostTopbar = await host.locator(".topbar").innerText();
       const hostScrubValue = await host.locator("#scrub").inputValue();
       throw new Error(
-        `[DEBUG-cb-sync] hostTopbar=${JSON.stringify(hostTopbar)} hostScrubValue=${JSON.stringify(hostScrubValue)} hostSent=${JSON.stringify(hostWs.sent)} hostRecv=${JSON.stringify(hostWs.received)} guestRecv=${JSON.stringify(g1Ws.received)} hostErrors=${JSON.stringify(hostErrors)} guestErrors=${JSON.stringify(guestErrors)}`,
+        `[DEBUG-cb-sync] hostTopbar=${JSON.stringify(hostTopbar)} hostScrubValue=${JSON.stringify(hostScrubValue)} hostPageErrors=${JSON.stringify(hostWs.pageErrors)} hostSent=${JSON.stringify(hostWs.sent)} hostRecv=${JSON.stringify(hostWs.received)} guestRecv=${JSON.stringify(g1Ws.received)} hostErrors=${JSON.stringify(hostErrors)} guestErrors=${JSON.stringify(guestErrors)}`,
         { cause },
       );
     }
