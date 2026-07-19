@@ -46,7 +46,7 @@ describe("createSerialQueue", () => {
     await expect(p2).resolves.toBe("ok");
   });
 
-  it("invalidate rejects later queued work", async () => {
+  it("invalidate rejects stale work and permits newly queued work", async () => {
     const q = createSerialQueue();
     let started = false;
     const slow = q.enqueue(async () => {
@@ -61,6 +61,6 @@ describe("createSerialQueue", () => {
     // After invalidate, new enqueue uses new generation — should run
     await expect(later).resolves.toBe("later");
     expect(started).toBe(true);
-    await expect(slow).resolves.toBe("slow");
+    await expect(slow).rejects.toThrow("queue invalidated");
   });
 });
