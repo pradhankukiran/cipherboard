@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # Multi-stage build. Unit/integration/e2e failures prevent the final image.
-# Pins: Rust 1.85, Node 22.14, pnpm 10.32.1, wasm-pack 0.13.1
+# Pins: Rust 1.88, Node 22.14, pnpm 10.32.1, wasm-pack 0.13.1
 
-FROM rust:1.85-bookworm AS rust-base
+FROM rust:1.88-bookworm AS rust-base
 ENV CARGO_TERM_COLOR=never
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev clang cmake git curl ca-certificates \
