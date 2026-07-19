@@ -1,5 +1,7 @@
+pub mod aad;
 pub mod config;
 pub mod error;
+pub mod fingerprint;
 pub mod limits;
 pub mod protocol;
 pub mod rate_limit;

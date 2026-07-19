@@ -7,11 +7,8 @@ pub enum ClientMessage {
     Hello {
         participant_id: String,
         room_id: String,
-        session_token: String,
     },
-    RequestJoin {
-        // unused over WS after REST join; kept for protocol completeness
-    },
+    RequestJoin {},
     Approve {
         target_id: String,
     },
@@ -24,15 +21,21 @@ pub enum ClientMessage {
     Lock {
         locked: bool,
     },
-    /// Per-recipient ciphertext envelopes for one logical event.
+    /// Per-recipient ciphertext envelopes for one durable logical event.
     RelayEnvelopes {
         branch_id: String,
         event_id: String,
         seq_hint: Option<u64>,
         envelopes: Vec<EnvelopeWire>,
     },
+    /// Ephemeral encrypted envelopes (cursors). Not persisted, no seq.
+    RelayEphemeral {
+        event_id: String,
+        envelopes: Vec<EnvelopeWire>,
+    },
     /// Encrypted history package for a newly approved participant.
     HistoryPackage {
+        event_id: String,
         branch_id: String,
         to_participant_id: String,
         through_seq: u64,
@@ -94,8 +97,19 @@ pub enum ServerMessage {
         ciphertext_b64: String,
         aad_json: String,
     },
+    /// Ephemeral encrypted payload (not stored).
+    Ephemeral {
+        room_id: String,
+        event_id: String,
+        sender_id: String,
+        recipient_id: String,
+        protocol_version: i32,
+        iv_b64: String,
+        ciphertext_b64: String,
+        aad_json: String,
+    },
     HistoryPackage {
-        id: String,
+        event_id: String,
         branch_id: String,
         from_participant_id: String,
         to_participant_id: String,

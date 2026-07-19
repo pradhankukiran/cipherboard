@@ -9,12 +9,30 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
+use crate::fingerprint::{fingerprint_from_spki_b64, fingerprints_match};
 use crate::limits::{
     valid_b64, valid_display_name, valid_id, MAX_FINGERPRINT, MAX_PUBLIC_KEY_B64,
 };
 use crate::protocol::{BranchPublic, ParticipantPublic, ServerMessage};
 use crate::state::{AppState, Session};
 use crate::ws;
+
+fn validate_key_fingerprint(spki: &str, claimed_fp: &str) -> AppResult<String> {
+    if !valid_b64(spki, MAX_PUBLIC_KEY_B64) {
+        return Err(AppError::BadRequest("invalid public_key_spki".into()));
+    }
+    if claimed_fp.is_empty() || claimed_fp.len() > MAX_FINGERPRINT {
+        return Err(AppError::BadRequest("invalid fingerprint".into()));
+    }
+    let actual = fingerprint_from_spki_b64(spki)
+        .map_err(|e| AppError::BadRequest(e))?;
+    if !fingerprints_match(claimed_fp, &actual) {
+        return Err(AppError::BadRequest(
+            "fingerprint does not match public key".into(),
+        ));
+    }
+    Ok(actual)
+}
 
 pub fn api_router() -> Router<Arc<AppState>> {
     Router::new()
@@ -52,12 +70,7 @@ async fn create_room(
     if !valid_display_name(&body.display_name) {
         return Err(AppError::BadRequest("invalid display_name".into()));
     }
-    if !valid_b64(&body.public_key_spki, MAX_PUBLIC_KEY_B64) {
-        return Err(AppError::BadRequest("invalid public_key_spki".into()));
-    }
-    if body.fingerprint.is_empty() || body.fingerprint.len() > MAX_FINGERPRINT {
-        return Err(AppError::BadRequest("invalid fingerprint".into()));
-    }
+    let fingerprint = validate_key_fingerprint(&body.public_key_spki, &body.fingerprint)?;
 
     let room_id = new_id("rm");
     let participant_id = new_id("p");
@@ -93,7 +106,7 @@ async fn create_room(
     .bind(&room_id)
     .bind(body.display_name.trim())
     .bind(&body.public_key_spki)
-    .bind(&body.fingerprint)
+    .bind(&fingerprint)
     .bind(&token_hash)
     .execute(&mut *tx)
     .await?;
@@ -162,12 +175,7 @@ async fn join_room(
     if !valid_display_name(&body.display_name) {
         return Err(AppError::BadRequest("invalid display_name".into()));
     }
-    if !valid_b64(&body.public_key_spki, MAX_PUBLIC_KEY_B64) {
-        return Err(AppError::BadRequest("invalid public_key_spki".into()));
-    }
-    if body.fingerprint.is_empty() || body.fingerprint.len() > MAX_FINGERPRINT {
-        return Err(AppError::BadRequest("invalid fingerprint".into()));
-    }
+    let fingerprint = validate_key_fingerprint(&body.public_key_spki, &body.fingerprint)?;
     if body.invite_code.len() < 6 || body.invite_code.len() > 64 {
         return Err(AppError::BadRequest("invalid invite_code".into()));
     }
@@ -235,7 +243,7 @@ async fn join_room(
     .bind(&room_id)
     .bind(body.display_name.trim())
     .bind(&body.public_key_spki)
-    .bind(&body.fingerprint)
+    .bind(&fingerprint)
     .bind(&token_hash)
     .execute(&state.db)
     .await?;
@@ -254,7 +262,7 @@ async fn join_room(
         id: participant_id.clone(),
         display_name: body.display_name.trim().to_string(),
         public_key_spki: body.public_key_spki,
-        fingerprint: body.fingerprint,
+        fingerprint,
         role: "guest".into(),
         status: "waiting".into(),
     };

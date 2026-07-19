@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
-use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Query, State, WebSocketUpgrade};
-use axum::response::IntoResponse;
+use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use axum::extract::{State, WebSocketUpgrade};
+use axum::http::{HeaderMap, HeaderValue};
+use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use tokio::sync::mpsc;
 
+use crate::aad::{assert_aad_matches, parse_aad, validate_ciphertext_bytes, validate_iv_bytes};
 use crate::error::AppError;
 use crate::limits::{
-    valid_b64, valid_id, MAX_AAD_JSON, MAX_BRANCH_NAME, MAX_CIPHERTEXT_B64,
-    MAX_ENVELOPES_PER_MESSAGE, MAX_EVENT_ID, MAX_IV_B64, PROTOCOL_VERSION,
+    valid_id, MAX_AAD_JSON, MAX_BRANCH_NAME, MAX_ENVELOPES_PER_MESSAGE, MAX_EVENT_ID,
+    PROTOCOL_VERSION,
 };
 use crate::protocol::{
     BranchPublic, ClientMessage, EnvelopeWire, ParticipantPublic, ServerMessage,
@@ -18,29 +19,63 @@ use crate::protocol::{
 use crate::routes::{load_branches, load_participants, resolve_session, ParticipantRow};
 use crate::state::AppState;
 
-#[derive(Debug, Deserialize)]
-pub struct WsQuery {
-    pub token: String,
+pub const WS_PROTOCOL: &str = "cipherboard";
+const AUTH_PREFIX: &str = "auth.";
+
+/// Parse Sec-WebSocket-Protocol: expect `cipherboard` plus `auth.<hex-token>`.
+/// Returns (token, negotiated protocol header value = cipherboard only).
+fn parse_ws_protocols(headers: &HeaderMap) -> Result<(String, HeaderValue), AppError> {
+    let raw = headers
+        .get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| AppError::Unauthorized("missing websocket protocol".into()))?;
+
+    let mut token: Option<String> = None;
+    let mut has_app = false;
+    for part in raw.split(',') {
+        let p = part.trim();
+        if p.eq_ignore_ascii_case(WS_PROTOCOL) {
+            has_app = true;
+        } else if let Some(rest) = p
+            .strip_prefix(AUTH_PREFIX)
+            .or_else(|| p.strip_prefix("Auth.").map(|s| s))
+        {
+            // browsers send as-is; accept auth.<hex>
+            let t = rest.trim();
+            if t.is_empty() || t.len() > 128 || !t.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(AppError::Unauthorized("invalid auth protocol".into()));
+            }
+            token = Some(t.to_string());
+        }
+    }
+    if !has_app {
+        return Err(AppError::Unauthorized("missing cipherboard protocol".into()));
+    }
+    let token = token.ok_or_else(|| AppError::Unauthorized("missing auth protocol".into()))?;
+    let negotiated = HeaderValue::from_static(WS_PROTOCOL);
+    Ok((token, negotiated))
 }
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
-    Query(q): Query<WsQuery>,
-) -> impl IntoResponse {
-    if q.token.is_empty() || q.token.len() > 128 {
-        return AppError::Unauthorized("invalid token".into()).into_response();
-    }
-    let Some(session) = resolve_session(&state, &q.token).await else {
+    headers: HeaderMap,
+) -> Response {
+    let (token, _negotiated) = match parse_ws_protocols(&headers) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let Some(session) = resolve_session(&state, &token).await else {
         return AppError::Unauthorized("unknown session".into()).into_response();
     };
-    ws.on_upgrade(move |socket| {
+    // Negotiate only the fixed application protocol; auth.* is parsed above, never echoed.
+    ws.protocols([WS_PROTOCOL]).on_upgrade(move |socket| {
         handle_socket(
             socket,
             state,
             session.participant_id,
             session.room_id,
-            q.token,
+            token,
         )
     })
 }
@@ -57,8 +92,6 @@ async fn handle_socket(
 
     let mut room_rx = state.room_sender(&room_id).subscribe();
 
-    // Outbound task: local queue + room broadcast
-    let out_state = state.clone();
     let out_pid = participant_id.clone();
     let out_room = room_id.clone();
     let writer = tokio::spawn(async move {
@@ -77,15 +110,15 @@ async fn handle_socket(
                 msg = room_rx.recv() => {
                     match msg {
                         Ok(json) => {
-                            // Filter envelopes not for this participant
                             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&json) {
-                                if parsed.get("type").and_then(|t| t.as_str()) == Some("envelope") {
+                                let ty = parsed.get("type").and_then(|t| t.as_str());
+                                if ty == Some("envelope") || ty == Some("ephemeral") {
                                     let recip = parsed.get("recipient_id").and_then(|v| v.as_str());
                                     if recip != Some(out_pid.as_str()) {
                                         continue;
                                     }
                                 }
-                                if parsed.get("type").and_then(|t| t.as_str()) == Some("history_package") {
+                                if ty == Some("history_package") {
                                     let recip = parsed.get("to_participant_id").and_then(|v| v.as_str());
                                     if recip != Some(out_pid.as_str()) {
                                         continue;
@@ -105,12 +138,10 @@ async fn handle_socket(
                 }
             }
         }
-        let _ = out_state;
     });
 
-    // Load session status
-    let session = match state.sessions.get(&token) {
-        Some(s) => s.clone(),
+    let session = match resolve_session(&state, &token).await {
+        Some(s) => s,
         None => {
             AppState::send_to_conn(
                 &tx,
@@ -119,6 +150,11 @@ async fn handle_socket(
                     message: "session expired".into(),
                 },
             );
+            let _ = tx.send(Message::Close(Some(CloseFrame {
+                code: 1008,
+                reason: "unauthorized".into(),
+            })));
+            writer.abort();
             return;
         }
     };
@@ -163,75 +199,8 @@ async fn handle_socket(
         );
     }
 
-    // Catch-up envelopes for approved participants
     if session.status == "approved" {
-        if let Ok(rows) = sqlx::query_as::<_, EnvelopeRow>(
-            r#"
-            SELECT room_id, branch_id, event_id, sender_id, recipient_id, seq,
-                   protocol_version, iv_b64, ciphertext_b64, aad_json
-            FROM envelopes
-            WHERE room_id = $1 AND recipient_id = $2
-            ORDER BY seq ASC
-            LIMIT 5000
-            "#,
-        )
-        .bind(&room_id)
-        .bind(&participant_id)
-        .fetch_all(&state.db)
-        .await
-        {
-            for row in rows {
-                state
-                    .ensure_seq_floor(&room_id, &row.branch_id, row.seq as u64)
-                    .await;
-                AppState::send_to_conn(
-                    &tx,
-                    &ServerMessage::Envelope {
-                        room_id: row.room_id,
-                        branch_id: row.branch_id,
-                        event_id: row.event_id,
-                        sender_id: row.sender_id,
-                        recipient_id: row.recipient_id,
-                        seq: row.seq as u64,
-                        protocol_version: row.protocol_version,
-                        iv_b64: row.iv_b64,
-                        ciphertext_b64: row.ciphertext_b64,
-                        aad_json: row.aad_json,
-                    },
-                );
-            }
-        }
-
-        if let Ok(pkgs) = sqlx::query_as::<_, HistoryRow>(
-            r#"
-            SELECT id, branch_id, from_participant_id, to_participant_id, through_seq,
-                   iv_b64, ciphertext_b64, aad_json
-            FROM history_packages
-            WHERE room_id = $1 AND to_participant_id = $2
-            ORDER BY created_at ASC
-            "#,
-        )
-        .bind(&room_id)
-        .bind(&participant_id)
-        .fetch_all(&state.db)
-        .await
-        {
-            for p in pkgs {
-                AppState::send_to_conn(
-                    &tx,
-                    &ServerMessage::HistoryPackage {
-                        id: p.id,
-                        branch_id: p.branch_id,
-                        from_participant_id: p.from_participant_id,
-                        to_participant_id: p.to_participant_id,
-                        through_seq: p.through_seq as u64,
-                        iv_b64: p.iv_b64,
-                        ciphertext_b64: p.ciphertext_b64,
-                        aad_json: p.aad_json,
-                    },
-                );
-            }
-        }
+        deliver_catchup(&state, &tx, &room_id, &participant_id).await;
     }
 
     while let Some(Ok(msg)) = stream.next().await {
@@ -322,6 +291,125 @@ async fn handle_socket(
     tracing::info!(%participant_id, %room_id, "ws disconnected");
 }
 
+async fn deliver_catchup(
+    state: &AppState,
+    tx: &mpsc::UnboundedSender<Message>,
+    room_id: &str,
+    participant_id: &str,
+) {
+    if let Ok(rows) = sqlx::query_as::<_, EnvelopeRow>(
+        r#"
+        SELECT room_id, branch_id, event_id, sender_id, recipient_id, seq,
+               protocol_version, iv_b64, ciphertext_b64, aad_json
+        FROM envelopes
+        WHERE room_id = $1 AND recipient_id = $2
+        ORDER BY seq ASC
+        LIMIT 5000
+        "#,
+    )
+    .bind(room_id)
+    .bind(participant_id)
+    .fetch_all(&state.db)
+    .await
+    {
+        for row in rows {
+            state
+                .ensure_seq_floor(room_id, &row.branch_id, row.seq as u64)
+                .await;
+            AppState::send_to_conn(
+                tx,
+                &ServerMessage::Envelope {
+                    room_id: row.room_id,
+                    branch_id: row.branch_id,
+                    event_id: row.event_id,
+                    sender_id: row.sender_id,
+                    recipient_id: row.recipient_id,
+                    seq: row.seq as u64,
+                    protocol_version: row.protocol_version,
+                    iv_b64: row.iv_b64,
+                    ciphertext_b64: row.ciphertext_b64,
+                    aad_json: row.aad_json,
+                },
+            );
+        }
+    }
+
+    if let Ok(pkgs) = sqlx::query_as::<_, HistoryRow>(
+        r#"
+        SELECT event_id, branch_id, from_participant_id, to_participant_id, through_seq,
+               iv_b64, ciphertext_b64, aad_json
+        FROM history_packages
+        WHERE room_id = $1 AND to_participant_id = $2
+        ORDER BY created_at ASC
+        "#,
+    )
+    .bind(room_id)
+    .bind(participant_id)
+    .fetch_all(&state.db)
+    .await
+    {
+        for p in pkgs {
+            AppState::send_to_conn(
+                tx,
+                &ServerMessage::HistoryPackage {
+                    event_id: p.event_id,
+                    branch_id: p.branch_id,
+                    from_participant_id: p.from_participant_id,
+                    to_participant_id: p.to_participant_id,
+                    through_seq: p.through_seq as u64,
+                    iv_b64: p.iv_b64,
+                    ciphertext_b64: p.ciphertext_b64,
+                    aad_json: p.aad_json,
+                },
+            );
+        }
+    }
+}
+
+async fn fresh_status(state: &AppState, room_id: &str, participant_id: &str) -> Result<String, String> {
+    sqlx::query_scalar::<_, String>(
+        r#"SELECT status FROM participants WHERE id = $1 AND room_id = $2"#,
+    )
+    .bind(participant_id)
+    .bind(room_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "not a participant".into())
+}
+
+async fn require_approved_db(
+    state: &AppState,
+    room_id: &str,
+    participant_id: &str,
+) -> Result<(), String> {
+    let status = fresh_status(state, room_id, participant_id).await?;
+    if status != "approved" {
+        return Err("not approved".into());
+    }
+    Ok(())
+}
+
+async fn require_host_db(
+    state: &AppState,
+    room_id: &str,
+    participant_id: &str,
+) -> Result<(), String> {
+    let row = sqlx::query_as::<_, (String, String)>(
+        r#"SELECT role, status FROM participants WHERE id = $1 AND room_id = $2"#,
+    )
+    .bind(participant_id)
+    .bind(room_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "not a participant".to_string())?;
+    if row.0 != "host" || row.1 != "approved" {
+        return Err("host only".into());
+    }
+    Ok(())
+}
+
 async fn handle_client_message(
     state: &AppState,
     tx: &mpsc::UnboundedSender<Message>,
@@ -330,11 +418,8 @@ async fn handle_client_message(
     room_id: &str,
     msg: ClientMessage,
 ) -> Result<(), String> {
-    let session = state
-        .sessions
-        .get(token)
-        .map(|s| s.clone())
-        .ok_or_else(|| "session expired".to_string())?;
+    // Keep memory session warm
+    let _ = resolve_session(state, token).await;
 
     match msg {
         ClientMessage::Ping { ts } => {
@@ -343,33 +428,31 @@ async fn handle_client_message(
         }
         ClientMessage::Hello { .. } | ClientMessage::RequestJoin {} => Ok(()),
         ClientMessage::Approve { target_id } => {
-            require_host(&session)?;
+            require_host_db(state, room_id, participant_id).await?;
             set_status(state, room_id, &target_id, "approved").await?;
-            // Update session if present
             update_session_status(state, &target_id, "approved");
             broadcast_participant(state, room_id, &target_id).await?;
             Ok(())
         }
         ClientMessage::Reject { target_id } => {
-            require_host(&session)?;
+            require_host_db(state, room_id, participant_id).await?;
             set_status(state, room_id, &target_id, "rejected").await?;
             update_session_status(state, &target_id, "rejected");
             broadcast_participant(state, room_id, &target_id).await?;
             Ok(())
         }
         ClientMessage::Remove { target_id } => {
-            require_host(&session)?;
+            require_host_db(state, room_id, participant_id).await?;
             if target_id == participant_id {
                 return Err("cannot remove self".into());
             }
             set_status(state, room_id, &target_id, "removed").await?;
             update_session_status(state, &target_id, "removed");
             broadcast_participant(state, room_id, &target_id).await?;
-            // Clients rotate keys on remove; server just stops future delivery
             Ok(())
         }
         ClientMessage::Lock { locked } => {
-            require_host(&session)?;
+            require_host_db(state, room_id, participant_id).await?;
             sqlx::query(r#"UPDATE rooms SET locked = $1, updated_at = NOW() WHERE id = $2"#)
                 .bind(locked)
                 .bind(room_id)
@@ -398,98 +481,26 @@ async fn handle_client_message(
             seq_hint: _,
             envelopes,
         } => {
-            require_approved(&session)?;
-            if !valid_id(&branch_id) {
-                return Err("invalid branch_id".into());
-            }
-            if event_id.is_empty() || event_id.len() > MAX_EVENT_ID {
-                return Err("invalid event_id".into());
-            }
-            if envelopes.is_empty() || envelopes.len() > MAX_ENVELOPES_PER_MESSAGE {
-                return Err("invalid envelopes count".into());
-            }
-            for env in &envelopes {
-                validate_envelope(env)?;
-            }
-
-            // Verify branch belongs to room
-            let branch_ok: Option<bool> = sqlx::query_scalar(
-                r#"SELECT TRUE FROM branches WHERE id = $1 AND room_id = $2"#,
+            require_approved_db(state, room_id, participant_id).await?;
+            relay_durable(
+                state,
+                room_id,
+                participant_id,
+                &branch_id,
+                &event_id,
+                envelopes,
             )
-            .bind(&branch_id)
-            .bind(room_id)
-            .fetch_optional(&state.db)
             .await
-            .map_err(|e| e.to_string())?;
-            if branch_ok.is_none() {
-                return Err("unknown branch".into());
-            }
-
-            // Only deliver to currently approved recipients (plus self)
-            let approved: Vec<String> = sqlx::query_scalar(
-                r#"SELECT id FROM participants WHERE room_id = $1 AND status = 'approved'"#,
-            )
-            .bind(room_id)
-            .fetch_all(&state.db)
-            .await
-            .map_err(|e| e.to_string())?;
-
-            let seq = state.next_seq(room_id, &branch_id).await;
-
-            for env in envelopes {
-                if !approved.iter().any(|id| id == &env.recipient_id)
-                    && env.recipient_id != participant_id
-                {
-                    continue;
-                }
-                // Persist
-                let res = sqlx::query(
-                    r#"
-                    INSERT INTO envelopes
-                        (room_id, branch_id, event_id, sender_id, recipient_id, seq,
-                         protocol_version, iv_b64, ciphertext_b64, aad_json)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-                    ON CONFLICT (room_id, branch_id, event_id, recipient_id) DO NOTHING
-                    "#,
-                )
-                .bind(room_id)
-                .bind(&branch_id)
-                .bind(&event_id)
-                .bind(participant_id)
-                .bind(&env.recipient_id)
-                .bind(seq as i64)
-                .bind(env.protocol_version)
-                .bind(&env.iv_b64)
-                .bind(&env.ciphertext_b64)
-                .bind(&env.aad_json)
-                .execute(&state.db)
-                .await
-                .map_err(|e| e.to_string())?;
-
-                if res.rows_affected() == 0 {
-                    // duplicate
-                    continue;
-                }
-
-                state.broadcast(
-                    room_id,
-                    &ServerMessage::Envelope {
-                        room_id: room_id.to_string(),
-                        branch_id: branch_id.clone(),
-                        event_id: event_id.clone(),
-                        sender_id: participant_id.to_string(),
-                        recipient_id: env.recipient_id,
-                        seq,
-                        protocol_version: env.protocol_version,
-                        iv_b64: env.iv_b64,
-                        ciphertext_b64: env.ciphertext_b64,
-                        aad_json: env.aad_json,
-                    },
-                );
-            }
-            Ok(())
+        }
+        ClientMessage::RelayEphemeral {
+            event_id,
+            envelopes,
+        } => {
+            require_approved_db(state, room_id, participant_id).await?;
+            relay_ephemeral(state, room_id, participant_id, &event_id, envelopes).await
         }
         ClientMessage::HistoryPackage {
+            event_id,
             branch_id,
             to_participant_id,
             through_seq,
@@ -497,27 +508,31 @@ async fn handle_client_message(
             ciphertext_b64,
             aad_json,
         } => {
-            require_approved(&session)?;
+            require_approved_db(state, room_id, participant_id).await?;
             if !valid_id(&branch_id) || !valid_id(&to_participant_id) {
                 return Err("invalid ids".into());
             }
-            if !valid_b64(&iv_b64, MAX_IV_B64)
-                || !valid_b64(&ciphertext_b64, MAX_CIPHERTEXT_B64)
-                || aad_json.is_empty()
-                || aad_json.len() > MAX_AAD_JSON
-            {
+            if event_id.is_empty() || event_id.len() > MAX_EVENT_ID {
+                return Err("invalid event_id".into());
+            }
+            if aad_json.is_empty() || aad_json.len() > MAX_AAD_JSON {
                 return Err("invalid history package".into());
             }
+            validate_iv_bytes(&iv_b64)?;
+            validate_ciphertext_bytes(&ciphertext_b64)?;
 
-            let target_status: Option<String> = sqlx::query_scalar(
-                r#"SELECT status FROM participants WHERE id = $1 AND room_id = $2"#,
-            )
-            .bind(&to_participant_id)
-            .bind(room_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| e.to_string())?;
-            if target_status.as_deref() != Some("approved") {
+            let aad = parse_aad(&aad_json)?;
+            assert_aad_matches(
+                &aad,
+                room_id,
+                participant_id,
+                &to_participant_id,
+                &event_id,
+                &branch_id,
+            )?;
+
+            let target_status = fresh_status(state, room_id, &to_participant_id).await?;
+            if target_status != "approved" {
                 return Err("target not approved".into());
             }
 
@@ -525,12 +540,13 @@ async fn handle_client_message(
             sqlx::query(
                 r#"
                 INSERT INTO history_packages
-                    (id, room_id, branch_id, from_participant_id, to_participant_id,
+                    (id, event_id, room_id, branch_id, from_participant_id, to_participant_id,
                      through_seq, iv_b64, ciphertext_b64, aad_json)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
                 "#,
             )
             .bind(&id)
+            .bind(&event_id)
             .bind(room_id)
             .bind(&branch_id)
             .bind(participant_id)
@@ -546,7 +562,7 @@ async fn handle_client_message(
             state.broadcast(
                 room_id,
                 &ServerMessage::HistoryPackage {
-                    id,
+                    event_id,
                     branch_id,
                     from_participant_id: participant_id.to_string(),
                     to_participant_id,
@@ -563,7 +579,7 @@ async fn handle_client_message(
             parent_branch_id,
             fork_seq,
         } => {
-            require_approved(&session)?;
+            require_approved_db(state, room_id, participant_id).await?;
             let name = name.trim().to_string();
             if name.is_empty() || name.len() > MAX_BRANCH_NAME {
                 return Err("invalid branch name".into());
@@ -583,6 +599,19 @@ async fn handle_client_message(
                 return Err("unknown parent branch".into());
             }
 
+            let parent_max: Option<i64> = sqlx::query_scalar(
+                r#"SELECT MAX(seq) FROM envelopes WHERE room_id = $1 AND branch_id = $2"#,
+            )
+            .bind(room_id)
+            .bind(&parent_branch_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| e.to_string())?;
+            let parent_max = parent_max.unwrap_or(0) as u64;
+            if fork_seq > parent_max {
+                return Err("fork_seq exceeds parent max".into());
+            }
+
             let id = format!("br_{}", uuid::Uuid::new_v4().simple());
             sqlx::query(
                 r#"
@@ -600,6 +629,9 @@ async fn handle_client_message(
             .await
             .map_err(|e| e.to_string())?;
 
+            // Child seq starts after fork_seq
+            state.ensure_seq_floor(room_id, &id, fork_seq).await;
+
             let branch = BranchPublic {
                 id,
                 name,
@@ -612,35 +644,177 @@ async fn handle_client_message(
     }
 }
 
-fn require_host(session: &crate::state::Session) -> Result<(), String> {
-    if session.role != "host" || session.status != "approved" {
-        return Err("host only".into());
-    }
-    Ok(())
+async fn approved_ids(state: &AppState, room_id: &str) -> Result<Vec<String>, String> {
+    sqlx::query_scalar(
+        r#"SELECT id FROM participants WHERE room_id = $1 AND status = 'approved'"#,
+    )
+    .bind(room_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| e.to_string())
 }
 
-fn require_approved(session: &crate::state::Session) -> Result<(), String> {
-    if session.status != "approved" {
-        return Err("not approved".into());
-    }
-    Ok(())
-}
-
-fn validate_envelope(env: &EnvelopeWire) -> Result<(), String> {
+fn validate_envelope_crypto(env: &EnvelopeWire) -> Result<(), String> {
     if !valid_id(&env.recipient_id) {
         return Err("invalid recipient".into());
     }
     if env.protocol_version != PROTOCOL_VERSION {
         return Err("unsupported protocol version".into());
     }
-    if !valid_b64(&env.iv_b64, MAX_IV_B64) {
-        return Err("invalid iv".into());
-    }
-    if !valid_b64(&env.ciphertext_b64, MAX_CIPHERTEXT_B64) {
-        return Err("invalid ciphertext".into());
-    }
     if env.aad_json.is_empty() || env.aad_json.len() > MAX_AAD_JSON {
         return Err("invalid aad".into());
+    }
+    validate_iv_bytes(&env.iv_b64)?;
+    validate_ciphertext_bytes(&env.ciphertext_b64)?;
+    Ok(())
+}
+
+async fn relay_durable(
+    state: &AppState,
+    room_id: &str,
+    sender_id: &str,
+    branch_id: &str,
+    event_id: &str,
+    envelopes: Vec<EnvelopeWire>,
+) -> Result<(), String> {
+    if !valid_id(branch_id) {
+        return Err("invalid branch_id".into());
+    }
+    if event_id.is_empty() || event_id.len() > MAX_EVENT_ID {
+        return Err("invalid event_id".into());
+    }
+    if envelopes.is_empty() || envelopes.len() > MAX_ENVELOPES_PER_MESSAGE {
+        return Err("invalid envelopes count".into());
+    }
+
+    let branch_ok: Option<bool> =
+        sqlx::query_scalar(r#"SELECT TRUE FROM branches WHERE id = $1 AND room_id = $2"#)
+            .bind(branch_id)
+            .bind(room_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| e.to_string())?;
+    if branch_ok.is_none() {
+        return Err("unknown branch".into());
+    }
+
+    let approved = approved_ids(state, room_id).await?;
+    let seq = state.next_seq(room_id, branch_id).await;
+
+    for env in envelopes {
+        validate_envelope_crypto(&env)?;
+        let aad = parse_aad(&env.aad_json)?;
+        assert_aad_matches(
+            &aad,
+            room_id,
+            sender_id,
+            &env.recipient_id,
+            event_id,
+            branch_id,
+        )?;
+
+        // Never deliver to non-approved (except self while approved)
+        if !approved.iter().any(|id| id == &env.recipient_id) {
+            continue;
+        }
+
+        let res = sqlx::query(
+            r#"
+            INSERT INTO envelopes
+                (room_id, branch_id, event_id, sender_id, recipient_id, seq,
+                 protocol_version, iv_b64, ciphertext_b64, aad_json)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            ON CONFLICT (room_id, branch_id, event_id, recipient_id) DO NOTHING
+            "#,
+        )
+        .bind(room_id)
+        .bind(branch_id)
+        .bind(event_id)
+        .bind(sender_id)
+        .bind(&env.recipient_id)
+        .bind(seq as i64)
+        .bind(env.protocol_version)
+        .bind(&env.iv_b64)
+        .bind(&env.ciphertext_b64)
+        .bind(&env.aad_json)
+        .execute(&state.db)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        if res.rows_affected() == 0 {
+            continue;
+        }
+
+        state.broadcast(
+            room_id,
+            &ServerMessage::Envelope {
+                room_id: room_id.to_string(),
+                branch_id: branch_id.to_string(),
+                event_id: event_id.to_string(),
+                sender_id: sender_id.to_string(),
+                recipient_id: env.recipient_id,
+                seq,
+                protocol_version: env.protocol_version,
+                iv_b64: env.iv_b64,
+                ciphertext_b64: env.ciphertext_b64,
+                aad_json: env.aad_json,
+            },
+        );
+    }
+    Ok(())
+}
+
+async fn relay_ephemeral(
+    state: &AppState,
+    room_id: &str,
+    sender_id: &str,
+    event_id: &str,
+    envelopes: Vec<EnvelopeWire>,
+) -> Result<(), String> {
+    if event_id.is_empty() || event_id.len() > MAX_EVENT_ID {
+        return Err("invalid event_id".into());
+    }
+    if envelopes.is_empty() || envelopes.len() > MAX_ENVELOPES_PER_MESSAGE {
+        return Err("invalid envelopes count".into());
+    }
+    // Ephemeral branch id in AAD is fixed marker
+    let branch_marker = "ephemeral";
+    let approved = approved_ids(state, room_id).await?;
+
+    for env in envelopes {
+        validate_envelope_crypto(&env)?;
+        // Smaller ephemeral payload limit
+        if env.ciphertext_b64.len() > 4096 {
+            return Err("ephemeral too large".into());
+        }
+        let aad = parse_aad(&env.aad_json)?;
+        assert_aad_matches(
+            &aad,
+            room_id,
+            sender_id,
+            &env.recipient_id,
+            event_id,
+            branch_marker,
+        )?;
+        if !approved.iter().any(|id| id == &env.recipient_id) {
+            continue;
+        }
+        if env.recipient_id == sender_id {
+            continue; // no need to echo cursor to self
+        }
+        state.broadcast(
+            room_id,
+            &ServerMessage::Ephemeral {
+                room_id: room_id.to_string(),
+                event_id: event_id.to_string(),
+                sender_id: sender_id.to_string(),
+                recipient_id: env.recipient_id,
+                protocol_version: env.protocol_version,
+                iv_b64: env.iv_b64,
+                ciphertext_b64: env.ciphertext_b64,
+                aad_json: env.aad_json,
+            },
+        );
     }
     Ok(())
 }
@@ -679,7 +853,6 @@ async fn set_status(
         .await
         .map_err(|e| e.to_string())?;
         if count as usize > state.config.max_room_size {
-            // roll back
             let _ = sqlx::query(
                 r#"UPDATE participants SET status = 'waiting' WHERE id = $1 AND room_id = $2"#,
             )
@@ -699,7 +872,6 @@ fn update_session_status(state: &AppState, participant_id: &str, status: &str) {
             entry.status = status.to_string();
         }
     }
-    // DB status already updated by set_status; memory sessions stay in sync above.
 }
 
 async fn broadcast_participant(
@@ -744,7 +916,7 @@ struct EnvelopeRow {
 
 #[derive(sqlx::FromRow)]
 struct HistoryRow {
-    id: String,
+    event_id: String,
     branch_id: String,
     from_participant_id: String,
     to_participant_id: String,
@@ -753,4 +925,3 @@ struct HistoryRow {
     ciphertext_b64: String,
     aad_json: String,
 }
-
