@@ -3,6 +3,10 @@ import { CryptoSession, type PeerInfo } from "../crypto/session";
 import { randomId, verifyFingerprint } from "../crypto/keys";
 import { wsProtocols, wsUrl } from "../lib/api";
 import {
+  createRevisionGate,
+  createSerialQueue,
+} from "../lib/asyncOrder";
+import {
   decodeEvent,
   encodeEvent,
   replayBranch,
@@ -77,6 +81,9 @@ export function useRoom(session: RoomSession | null) {
   const reconnectTimer = useRef<number | null>(null);
   const generation = useRef(0);
 
+  const replayGateRef = useRef(createRevisionGate());
+  const durableQueueRef = useRef(createSerialQueue());
+
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
@@ -102,41 +109,6 @@ export function useRoom(session: RoomSession | null) {
     myStatusRef.current = myStatus;
   }, [myStatus]);
 
-  const rebuildSnapshot = useCallback(
-    async (
-      entries: TimelineEntry[],
-      branchList: Branch[],
-      branchId: string,
-      through: number | null,
-      author: string | null,
-    ) => {
-      if (!branchId) {
-        setSnapshot({
-          strokes: [],
-          undo_stack: [],
-          redo_stack: [],
-          last_seq: 0,
-        });
-        return;
-      }
-      const maxSeq = entries.reduce((m, e) => Math.max(m, e.seq), 0) || 0;
-      const thru = through ?? maxSeq;
-      try {
-        const snap = await replayBranch(
-          entries,
-          branchList,
-          branchId,
-          thru,
-          author,
-        );
-        setSnapshot(snap);
-      } catch {
-        // avoid logging sensitive timeline material
-      }
-    },
-    [],
-  );
-
   const send = useCallback((obj: unknown) => {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -155,8 +127,52 @@ export function useRoom(session: RoomSession | null) {
       }));
   }, []);
 
-  const publishDurable = useCallback(
-    async (event: BoardEvent) => {
+  /** Single authoritative snapshot path: only latest revision may setSnapshot. */
+  useEffect(() => {
+    const gate = replayGateRef.current;
+    const token = gate.next();
+    const branchId = activeBranchId;
+
+    if (!branchId) {
+      if (gate.isCurrent(token)) {
+        setSnapshot({
+          strokes: [],
+          undo_stack: [],
+          redo_stack: [],
+          last_seq: 0,
+        });
+      }
+      return;
+    }
+
+    const maxSeq = timeline.reduce((m, e) => Math.max(m, e.seq), 0) || 0;
+    const thru = scrubSeq ?? maxSeq;
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const snap = await replayBranch(
+          timeline,
+          branches,
+          branchId,
+          thru,
+          authorFilter,
+        );
+        if (cancelled || !gate.isCurrent(token)) return;
+        setSnapshot(snap);
+      } catch {
+        // no sensitive logging
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [timeline, branches, activeBranchId, scrubSeq, authorFilter]);
+
+  /** Seal+send one durable event (must run on durable queue only). */
+  const publishDurableRaw = useCallback(
+    async (event: BoardEvent): Promise<void> => {
       const s = sessionRef.current;
       const crypto = cryptoRef.current;
       if (!s || !crypto || myStatusRef.current !== "approved") return;
@@ -188,6 +204,21 @@ export function useRoom(session: RoomSession | null) {
       });
     },
     [approvedPeers, send],
+  );
+
+  /** Serialize durable board events in call order (begin → points → end). */
+  const enqueueDurable = useCallback(
+    (fn: () => Promise<void>): void => {
+      void durableQueueRef.current.enqueue(fn);
+    },
+    [],
+  );
+
+  const publishDurable = useCallback(
+    (event: BoardEvent): void => {
+      enqueueDurable(() => publishDurableRaw(event));
+    },
+    [enqueueDurable, publishDurableRaw],
   );
 
   const publishEphemeral = useCallback(
@@ -225,6 +256,11 @@ export function useRoom(session: RoomSession | null) {
     if (!session) return;
     intentionalClose.current = false;
     const gen = ++generation.current;
+
+    replayGateRef.current.invalidate();
+    durableQueueRef.current.invalidate();
+    durableQueueRef.current = createSerialQueue();
+    replayGateRef.current = createRevisionGate();
 
     cryptoRef.current = new CryptoSession({
       privateKey: session.privateKey,
@@ -279,6 +315,7 @@ export function useRoom(session: RoomSession | null) {
           const parts = await sanitizeParticipants(
             (msg.participants as Participant[]) ?? [],
           );
+          if (generation.current !== gen) return;
           setParticipants(parts);
           const br = (msg.branches as Branch[]) ?? [];
           setBranches(br);
@@ -289,7 +326,7 @@ export function useRoom(session: RoomSession | null) {
         case "participant_updated": {
           const raw = msg.participant as Participant;
           const verified = await sanitizeParticipant(raw);
-          if (!verified) break;
+          if (!verified || generation.current !== gen) break;
           setParticipants((prev) => {
             const idx = prev.findIndex((x) => x.id === verified.id);
             let next =
@@ -346,7 +383,7 @@ export function useRoom(session: RoomSession | null) {
             branchId: String(msg.branch_id),
             recipientId: s.participantId,
           });
-          if (!plain) return;
+          if (!plain || generation.current !== gen) return;
           const packed = JSON.parse(plain) as {
             entries: Array<{
               seq: number;
@@ -368,6 +405,8 @@ export function useRoom(session: RoomSession | null) {
               event,
             });
           }
+          if (generation.current !== gen) return;
+          // Timeline update only — effect owns snapshot rebuild
           setTimeline((prev) => {
             const map = new Map(
               [...prev, ...restored].map((x) => [
@@ -375,15 +414,7 @@ export function useRoom(session: RoomSession | null) {
                 x,
               ]),
             );
-            const next = [...map.values()].sort((a, b) => a.seq - b.seq);
-            void rebuildSnapshot(
-              next,
-              branchesRef.current,
-              branchRef.current,
-              scrubRef.current,
-              authorRef.current,
-            );
-            return next;
+            return [...map.values()].sort((a, b) => a.seq - b.seq);
           });
           break;
         }
@@ -421,9 +452,7 @@ export function useRoom(session: RoomSession | null) {
           };
       if (sender && sender.status === "removed") return;
 
-      const branchId = ephemeral
-        ? EPHEMERAL_BRANCH
-        : String(msg.branch_id);
+      const branchId = ephemeral ? EPHEMERAL_BRANCH : String(msg.branch_id);
 
       let plain: string | null;
       try {
@@ -439,11 +468,13 @@ export function useRoom(session: RoomSession | null) {
       } catch {
         return;
       }
-      if (plain == null) return;
+      if (plain == null || generation.current !== gen) return;
       const event = await decodeEvent(plain);
+      if (generation.current !== gen) return;
       if (event.t === "cursor") {
         const name =
-          peersRef.current.find((p) => p.id === senderId)?.display_name ?? "peer";
+          peersRef.current.find((p) => p.id === senderId)?.display_name ??
+          "peer";
         setCursors((prev) => {
           const next = new Map(prev);
           if (!event.visible) next.delete(senderId);
@@ -466,6 +497,7 @@ export function useRoom(session: RoomSession | null) {
         branchId: String(msg.branch_id),
         event,
       };
+      // Timeline only — central effect rebuilds snapshot (no raced async here)
       setTimeline((prev) => {
         if (
           prev.some(
@@ -474,15 +506,7 @@ export function useRoom(session: RoomSession | null) {
         ) {
           return prev;
         }
-        const next = [...prev, entry].sort((a, b) => a.seq - b.seq);
-        void rebuildSnapshot(
-          next,
-          branchesRef.current,
-          branchRef.current,
-          scrubRef.current,
-          authorRef.current,
-        );
-        return next;
+        return [...prev, entry].sort((a, b) => a.seq - b.seq);
       });
     }
 
@@ -491,7 +515,6 @@ export function useRoom(session: RoomSession | null) {
       const crypto = cryptoRef.current;
       if (!s || !crypto) return;
       const entries = timelineRef.current.filter((e) => e.event.t !== "cursor");
-      // Include inherited branch content for active branch
       const payload = {
         entries: await Promise.all(
           entries.map(async (e) => ({
@@ -534,7 +557,6 @@ export function useRoom(session: RoomSession | null) {
 
     function openSocket() {
       if (generation.current !== gen || intentionalClose.current) return;
-      // Close any prior socket without scheduling reconnect from its onclose
       const prev = wsRef.current;
       if (prev) {
         prev.onclose = null;
@@ -601,6 +623,8 @@ export function useRoom(session: RoomSession | null) {
     return () => {
       intentionalClose.current = true;
       generation.current += 1;
+      replayGateRef.current.invalidate();
+      durableQueueRef.current.invalidate();
       clearReconnect();
       window.clearInterval(ping);
       const ws = wsRef.current;
@@ -610,17 +634,7 @@ export function useRoom(session: RoomSession | null) {
       }
       wsRef.current = null;
     };
-  }, [session?.roomId, session?.sessionToken, rebuildSnapshot, send]);
-
-  useEffect(() => {
-    void rebuildSnapshot(
-      timeline,
-      branches,
-      activeBranchId,
-      scrubSeq,
-      authorFilter,
-    );
-  }, [timeline, branches, activeBranchId, scrubSeq, authorFilter, rebuildSnapshot]);
+  }, [session?.roomId, session?.sessionToken, send]);
 
   const approve = useCallback(
     (id: string) => send({ type: "approve", target_id: id }),
@@ -643,53 +657,65 @@ export function useRoom(session: RoomSession | null) {
   );
 
   const beginStroke = useCallback(
-    async (id: string, color: string, width: number, tool: string) => {
-      await publishDurable({ t: "stroke_begin", id, color, width, tool });
+    (id: string, color: string, width: number, tool: string) => {
+      publishDurable({ t: "stroke_begin", id, color, width, tool });
     },
     [publishDurable],
   );
   const addStrokePoints = useCallback(
-    async (id: string, points: Point[]) => {
-      const simplified =
-        points.length > 8 ? await simplifyPoints(points, 1.2) : points;
-      await publishDurable({ t: "stroke_points", id, points: simplified });
+    (id: string, points: Point[]) => {
+      enqueueDurable(async () => {
+        const simplified =
+          points.length > 8 ? await simplifyPoints(points, 1.2) : points;
+        await publishDurableRaw({ t: "stroke_points", id, points: simplified });
+      });
     },
-    [publishDurable],
+    [enqueueDurable, publishDurableRaw],
   );
   const endStroke = useCallback(
-    async (id: string) => {
-      await publishDurable({ t: "stroke_end", id });
+    (id: string) => {
+      publishDurable({ t: "stroke_end", id });
     },
     [publishDurable],
   );
   const erase = useCallback(
-    async (id: string, points: Point[], width: number) => {
-      const simplified =
-        points.length > 8 ? await simplifyPoints(points, 1.2) : points;
-      await publishDurable({ t: "erase", id, points: simplified, width });
+    (id: string, points: Point[], width: number) => {
+      enqueueDurable(async () => {
+        const simplified =
+          points.length > 8 ? await simplifyPoints(points, 1.2) : points;
+        await publishDurableRaw({
+          t: "erase",
+          id,
+          points: simplified,
+          width,
+        });
+      });
     },
-    [publishDurable],
+    [enqueueDurable, publishDurableRaw],
   );
-  const clearBoard = useCallback(async () => {
-    await publishDurable({ t: "clear", nonce: await randomId("clr") });
-  }, [publishDurable]);
-  const undo = useCallback(async () => {
+  const clearBoard = useCallback(() => {
+    enqueueDurable(async () => {
+      const nonce = await randomId("clr");
+      await publishDurableRaw({ t: "clear", nonce });
+    });
+  }, [enqueueDurable, publishDurableRaw]);
+  const undo = useCallback(() => {
     const target = snapshot.undo_stack.at(-1);
-    if (target) await publishDurable({ t: "undo", target });
+    if (target) publishDurable({ t: "undo", target });
   }, [publishDurable, snapshot.undo_stack]);
-  const redo = useCallback(async () => {
+  const redo = useCallback(() => {
     const target = snapshot.redo_stack.at(-1);
-    if (target) await publishDurable({ t: "redo", target });
+    if (target) publishDurable({ t: "redo", target });
   }, [publishDurable, snapshot.redo_stack]);
   const sendCursor = useCallback(
-    async (x: number, y: number, visible: boolean) => {
-      await publishEphemeral({ t: "cursor", x, y, visible });
+    (x: number, y: number, visible: boolean) => {
+      void publishEphemeral({ t: "cursor", x, y, visible });
     },
     [publishEphemeral],
   );
 
   const forkBranch = useCallback(
-    async (name: string, forkSeq: number) => {
+    (name: string, forkSeq: number) => {
       send({
         type: "create_branch",
         name,
@@ -741,8 +767,7 @@ async function sanitizeParticipant(
   try {
     const ok = await verifyFingerprint(p.public_key_spki, p.fingerprint);
     if (!ok) return null;
-    const fp = p.fingerprint;
-    return { ...p, fingerprint: fp };
+    return { ...p, fingerprint: p.fingerprint };
   } catch {
     return null;
   }
