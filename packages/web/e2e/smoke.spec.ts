@@ -1,5 +1,38 @@
 import { expect, test, type Page } from "@playwright/test";
 
+function captureWs(page: Page) {
+  const sent: string[] = [];
+  const received: string[] = [];
+  page.on("websocket", (socket) => {
+    socket.on("framesent", ({ payload }) => {
+      try {
+        const msg = JSON.parse(String(payload)) as {
+          type?: string;
+          envelopes?: unknown[];
+        };
+        sent.push(`${msg.type ?? "unknown"}:${msg.envelopes?.length ?? "-"}`);
+      } catch {
+        sent.push("non-json");
+      }
+    });
+    socket.on("framereceived", ({ payload }) => {
+      try {
+        const msg = JSON.parse(String(payload)) as {
+          type?: string;
+          seq?: number;
+          message?: string;
+        };
+        received.push(
+          `${msg.type ?? "unknown"}:${msg.seq ?? "-"}:${msg.message ?? "-"}`,
+        );
+      } catch {
+        received.push("non-json");
+      }
+    });
+  });
+  return { sent, received };
+}
+
 async function createHost(page: Page, name: string) {
   await page.goto("/");
   await page.getByLabel("Display name").first().fill(name);
@@ -57,6 +90,8 @@ test.describe("cipherboard flows", () => {
     const host = await hostCtx.newPage();
     const g1 = await g1Ctx.newPage();
     const g2 = await g2Ctx.newPage();
+    const hostWs = captureWs(host);
+    const g1Ws = captureWs(g1);
 
     const { roomId, invite } = await createHost(host, "HostUser");
     expect(roomId.length).toBeGreaterThan(5);
@@ -80,11 +115,22 @@ test.describe("cipherboard flows", () => {
     // Drawing sync host -> GuestOne (observable timeline advance)
     const g1Before = Number((await g1.locator("#scrub").getAttribute("max")) ?? "0");
     await drawStroke(host);
-    await expect
-      .poll(async () => Number((await g1.locator("#scrub").getAttribute("max")) ?? "0"), {
-        timeout: 20000,
-      })
-      .toBeGreaterThan(g1Before);
+    try {
+      await expect
+        .poll(
+          async () =>
+            Number((await g1.locator("#scrub").getAttribute("max")) ?? "0"),
+          { timeout: 20000 },
+        )
+        .toBeGreaterThan(g1Before);
+    } catch (cause) {
+      const hostErrors = await host.locator(".error-box").allTextContents();
+      const guestErrors = await g1.locator(".error-box").allTextContents();
+      throw new Error(
+        `[DEBUG-cb-sync] hostSent=${JSON.stringify(hostWs.sent)} hostRecv=${JSON.stringify(hostWs.received)} guestRecv=${JSON.stringify(g1Ws.received)} hostErrors=${JSON.stringify(hostErrors)} guestErrors=${JSON.stringify(guestErrors)}`,
+        { cause },
+      );
+    }
 
     const hostMax = await scrubMax(host);
     expect(hostMax).toBeGreaterThan(0);
