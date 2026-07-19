@@ -6,9 +6,16 @@ export function paintSnapshot(
   width: number,
   height: number,
 ): void {
+  // Clear in backing-store pixels, then restore the caller's CSS-to-device
+  // transform before painting. Snapshot points use CSS pixel coordinates just
+  // like live pointer points; drawing them under the identity transform moves
+  // confirmed strokes on high-DPI displays.
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, width, height);
+  ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  ctx.restore();
+
+  ctx.save();
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, width, height);
   for (const stroke of snap.strokes) {
