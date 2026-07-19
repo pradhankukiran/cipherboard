@@ -89,11 +89,11 @@ export function CanvasBoard(props: {
     };
   };
 
-  const onPointerDown = async (e: React.PointerEvent) => {
+  const onPointerDown = (e: React.PointerEvent) => {
     if (props.disabled) return;
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
     drawing.current = true;
-    const id = await randomId("s");
+    const id = randomId("s");
     strokeId.current = id;
     const p = pos(e);
     points.current = [p];
@@ -139,9 +139,7 @@ export function CanvasBoard(props: {
       const id = strokeId.current!;
       if (props.tool === "eraser") {
         void props.onErase(id, batch, props.width);
-        void randomId("s").then((nid) => {
-          strokeId.current = nid;
-        });
+        strokeId.current = randomId("s");
       } else {
         props.onPoints(id, batch);
       }
