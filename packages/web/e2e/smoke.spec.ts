@@ -93,7 +93,7 @@ test.describe("cipherboard flows", () => {
     // Scrub to 0 then live
     await host.locator("#scrub").fill("0");
     await host.getByRole("button", { name: "Jump to live" }).click();
-    await expect(host.getByText(/live/i)).toBeVisible();
+    await expect(host.getByText(/^live — event history/i)).toBeVisible();
 
     // Fork: wait for option fork-e2e, select it, inherited timeline non-empty
     host.once("dialog", async (d) => {
