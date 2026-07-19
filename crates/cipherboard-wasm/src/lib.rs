@@ -6,11 +6,13 @@
 //! This crate must NEVER receive CryptoKey objects or raw secret key bytes.
 //! All cryptography stays in the browser WebCrypto layer (JS/TS).
 
+mod branch;
 mod encode;
 mod replay;
 mod smooth;
 mod validate;
 
+pub use branch::*;
 pub use encode::*;
 pub use replay::*;
 pub use smooth::*;
