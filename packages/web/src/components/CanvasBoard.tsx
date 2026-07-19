@@ -1,7 +1,26 @@
 import { useCallback, useEffect, useRef } from "react";
 import { drawCursors, drawLiveStroke, paintSnapshot } from "../lib/draw";
+import {
+  retainUnconfirmedStrokes,
+  type PendingLocalStroke,
+} from "../lib/pendingStroke";
 import type { BoardSnapshot, Point } from "../lib/types";
 import { randomId } from "../crypto/keys";
+
+function drawPendingStrokes(
+  ctx: CanvasRenderingContext2D,
+  pending: PendingLocalStroke[],
+) {
+  for (const stroke of pending) {
+    drawLiveStroke(
+      ctx,
+      stroke.points,
+      stroke.color,
+      stroke.width,
+      stroke.tool,
+    );
+  }
+}
 
 export function CanvasBoard(props: {
   snapshot: BoardSnapshot;
@@ -21,6 +40,8 @@ export function CanvasBoard(props: {
   const drawing = useRef(false);
   const strokeId = useRef<string | null>(null);
   const points = useRef<Point[]>([]);
+  const batchPoints = useRef<Point[]>([]);
+  const pendingStrokes = useRef<PendingLocalStroke[]>([]);
   const lastSend = useRef(0);
   const dprRef = useRef(1);
 
@@ -38,7 +59,11 @@ export function CanvasBoard(props: {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    pendingStrokes.current = props.disabled
+      ? []
+      : retainUnconfirmedStrokes(pendingStrokes.current, props.snapshot);
     paintSnapshot(ctx, props.snapshot, rect.width, rect.height);
+    drawPendingStrokes(ctx, pendingStrokes.current);
     if (drawing.current && points.current.length) {
       drawLiveStroke(
         ctx,
@@ -49,7 +74,14 @@ export function CanvasBoard(props: {
       );
     }
     drawCursors(ctx, props.cursors);
-  }, [props.snapshot, props.cursors, props.color, props.width, props.tool]);
+  }, [
+    props.snapshot,
+    props.cursors,
+    props.color,
+    props.width,
+    props.tool,
+    props.disabled,
+  ]);
 
   useEffect(() => {
     resize();
@@ -66,7 +98,11 @@ export function CanvasBoard(props: {
     if (!ctx) return;
     const rect = wrap.getBoundingClientRect();
     ctx.setTransform(dprRef.current, 0, 0, dprRef.current, 0, 0);
+    pendingStrokes.current = props.disabled
+      ? []
+      : retainUnconfirmedStrokes(pendingStrokes.current, props.snapshot);
     paintSnapshot(ctx, props.snapshot, rect.width, rect.height);
+    drawPendingStrokes(ctx, pendingStrokes.current);
     if (drawing.current && points.current.length) {
       drawLiveStroke(
         ctx,
@@ -77,7 +113,14 @@ export function CanvasBoard(props: {
       );
     }
     drawCursors(ctx, props.cursors);
-  }, [props.snapshot, props.cursors, props.color, props.width, props.tool]);
+  }, [
+    props.snapshot,
+    props.cursors,
+    props.color,
+    props.width,
+    props.tool,
+    props.disabled,
+  ]);
 
   const pos = (e: React.PointerEvent) => {
     const canvas = canvasRef.current!;
@@ -97,6 +140,7 @@ export function CanvasBoard(props: {
     strokeId.current = id;
     const p = pos(e);
     points.current = [p];
+    batchPoints.current = [p];
     if (props.tool === "eraser") {
       // erase events committed on end / batches
     } else {
@@ -115,6 +159,7 @@ export function CanvasBoard(props: {
     }
     if (!drawing.current || props.disabled) return;
     points.current.push(p);
+    batchPoints.current.push(p);
     const canvas = canvasRef.current;
     const wrap = wrapRef.current;
     if (canvas && wrap) {
@@ -123,6 +168,7 @@ export function CanvasBoard(props: {
         const rect = wrap.getBoundingClientRect();
         ctx.setTransform(dprRef.current, 0, 0, dprRef.current, 0, 0);
         paintSnapshot(ctx, props.snapshot, rect.width, rect.height);
+        drawPendingStrokes(ctx, pendingStrokes.current);
         drawLiveStroke(
           ctx,
           points.current,
@@ -133,9 +179,9 @@ export function CanvasBoard(props: {
         drawCursors(ctx, props.cursors);
       }
     }
-    if (points.current.length >= 24) {
-      const batch = points.current.slice();
-      points.current = [batch[batch.length - 1]!];
+    if (batchPoints.current.length >= 24) {
+      const batch = batchPoints.current.slice();
+      batchPoints.current = [batch[batch.length - 1]!];
       const id = strokeId.current!;
       if (props.tool === "eraser") {
         void props.onErase(id, batch, props.width);
@@ -153,13 +199,24 @@ export function CanvasBoard(props: {
     drawing.current = false;
     const id = strokeId.current;
     const pts = points.current;
+    const batch = batchPoints.current;
     points.current = [];
+    batchPoints.current = [];
     strokeId.current = null;
     if (!id || props.disabled) return;
+    if (pts.length) {
+      pendingStrokes.current.push({
+        id,
+        color: props.tool === "eraser" ? "#000" : props.color,
+        width: props.width,
+        tool: props.tool,
+        points: pts,
+      });
+    }
     if (props.tool === "eraser") {
-      if (pts.length) props.onErase(id, pts, props.width);
+      if (batch.length) props.onErase(id, batch, props.width);
     } else {
-      if (pts.length) props.onPoints(id, pts);
+      if (batch.length) props.onPoints(id, batch);
       props.onEnd(id);
     }
     props.onCursor(pos(e).x, pos(e).y, true);
