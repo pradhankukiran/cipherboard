@@ -62,6 +62,26 @@ async function joinGuest(page: Page, name: string, roomId: string, invite: strin
 async function drawStroke(page: Page) {
   const canvas = page.locator("canvas");
   await expect(canvas).toBeVisible({ timeout: 20000 });
+  await canvas.evaluate((element) => {
+    element.dataset.pointerDownCount = "0";
+    element.dataset.pointerMoveCount = "0";
+    element.dataset.pointerUpCount = "0";
+    element.addEventListener("pointerdown", () => {
+      element.dataset.pointerDownCount = String(
+        Number(element.dataset.pointerDownCount ?? "0") + 1,
+      );
+    });
+    element.addEventListener("pointermove", () => {
+      element.dataset.pointerMoveCount = String(
+        Number(element.dataset.pointerMoveCount ?? "0") + 1,
+      );
+    });
+    element.addEventListener("pointerup", () => {
+      element.dataset.pointerUpCount = String(
+        Number(element.dataset.pointerUpCount ?? "0") + 1,
+      );
+    });
+  });
   const box = await canvas.boundingBox();
   if (!box) throw new Error("no canvas box");
   const x = box.x + box.width * 0.3;
@@ -70,6 +90,25 @@ async function drawStroke(page: Page) {
   await page.mouse.down();
   await page.mouse.move(x + 80, y + 40, { steps: 8 });
   await page.mouse.up();
+  const hit = await page.evaluate(
+    ({ x, y }) => {
+      const element = document.elementFromPoint(x, y);
+      return {
+        tag: element?.tagName ?? null,
+        className: element?.className ?? null,
+      };
+    },
+    { x, y },
+  );
+  return {
+    box,
+    hit,
+    nativeCounts: await canvas.evaluate((element) => ({
+      down: element.dataset.pointerDownCount,
+      move: element.dataset.pointerMoveCount,
+      up: element.dataset.pointerUpCount,
+    })),
+  };
 }
 
 /** Timeline scrub max reflects durable events on the active branch. */
@@ -116,7 +155,7 @@ test.describe("cipherboard flows", () => {
 
     // Drawing sync host -> GuestOne (observable timeline advance)
     const g1Before = Number((await g1.locator("#scrub").getAttribute("max")) ?? "0");
-    await drawStroke(host);
+    const firstDraw = await drawStroke(host);
     try {
       await expect
         .poll(
@@ -131,7 +170,7 @@ test.describe("cipherboard flows", () => {
       const hostTopbar = await host.locator(".topbar").innerText();
       const hostScrubValue = await host.locator("#scrub").inputValue();
       throw new Error(
-        `[DEBUG-cb-sync] hostTopbar=${JSON.stringify(hostTopbar)} hostScrubValue=${JSON.stringify(hostScrubValue)} hostPageErrors=${JSON.stringify(hostWs.pageErrors)} hostSent=${JSON.stringify(hostWs.sent)} hostRecv=${JSON.stringify(hostWs.received)} guestRecv=${JSON.stringify(g1Ws.received)} hostErrors=${JSON.stringify(hostErrors)} guestErrors=${JSON.stringify(guestErrors)}`,
+        `[DEBUG-cb-sync] firstDraw=${JSON.stringify(firstDraw)} hostTopbar=${JSON.stringify(hostTopbar)} hostScrubValue=${JSON.stringify(hostScrubValue)} hostPageErrors=${JSON.stringify(hostWs.pageErrors)} hostSent=${JSON.stringify(hostWs.sent)} hostRecv=${JSON.stringify(hostWs.received)} guestRecv=${JSON.stringify(g1Ws.received)} hostErrors=${JSON.stringify(hostErrors)} guestErrors=${JSON.stringify(guestErrors)}`,
         { cause },
       );
     }
