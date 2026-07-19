@@ -209,7 +209,7 @@ export async function decryptFromSender(
   return new Uint8Array(pt);
 }
 
-export function randomId(prefix: string): string {
+export async function randomId(prefix: string): Promise<string> {
   const bytes = crypto.getRandomValues(new Uint8Array(12));
   return `${prefix}_${b64Encode(bytes).replace(/[+/=]/g, "").slice(0, 16)}`;
 }
