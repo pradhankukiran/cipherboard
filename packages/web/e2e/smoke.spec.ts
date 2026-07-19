@@ -126,8 +126,10 @@ test.describe("cipherboard flows", () => {
     } catch (cause) {
       const hostErrors = await host.locator(".error-box").allTextContents();
       const guestErrors = await g1.locator(".error-box").allTextContents();
+      const hostTopbar = await host.locator(".topbar").innerText();
+      const hostScrubValue = await host.locator("#scrub").inputValue();
       throw new Error(
-        `[DEBUG-cb-sync] hostSent=${JSON.stringify(hostWs.sent)} hostRecv=${JSON.stringify(hostWs.received)} guestRecv=${JSON.stringify(g1Ws.received)} hostErrors=${JSON.stringify(hostErrors)} guestErrors=${JSON.stringify(guestErrors)}`,
+        `[DEBUG-cb-sync] hostTopbar=${JSON.stringify(hostTopbar)} hostScrubValue=${JSON.stringify(hostScrubValue)} hostSent=${JSON.stringify(hostWs.sent)} hostRecv=${JSON.stringify(hostWs.received)} guestRecv=${JSON.stringify(g1Ws.received)} hostErrors=${JSON.stringify(hostErrors)} guestErrors=${JSON.stringify(guestErrors)}`,
         { cause },
       );
     }
