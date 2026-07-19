@@ -4,11 +4,11 @@
  */
 
 import init, {
+  branch_timeline,
   decode_event,
   encode_event,
-  fork_snapshot,
   protocol_version,
-  replay_through,
+  replay_branch,
   simplify_stroke,
   smooth_stroke,
 } from "../wasm/pkg/cipherboard_wasm.js";
@@ -19,12 +19,20 @@ type InMsg =
   | { id: number; op: "decode"; encoded: string }
   | {
       id: number;
-      op: "replay";
+      op: "replay_branch";
       entriesJson: string;
+      branchesJson: string;
+      branchId: string;
       throughSeq: number;
       authorFilter?: string | null;
     }
-  | { id: number; op: "fork"; entriesJson: string; forkSeq: number }
+  | {
+      id: number;
+      op: "branch_timeline";
+      entriesJson: string;
+      branchesJson: string;
+      branchId: string;
+    }
   | { id: number; op: "smooth"; pointsJson: string; iterations: number }
   | { id: number; op: "simplify"; pointsJson: string; tolerance: number };
 
@@ -63,22 +71,24 @@ self.onmessage = async (ev: MessageEvent<InMsg>) => {
           result: decode_event(msg.encoded),
         });
         break;
-      case "replay":
+      case "replay_branch":
         self.postMessage({
           id: msg.id,
           ok: true,
-          result: replay_through(
+          result: replay_branch(
             msg.entriesJson,
+            msg.branchesJson,
+            msg.branchId,
             BigInt(msg.throughSeq),
             msg.authorFilter ?? undefined,
           ),
         });
         break;
-      case "fork":
+      case "branch_timeline":
         self.postMessage({
           id: msg.id,
           ok: true,
-          result: fork_snapshot(msg.entriesJson, BigInt(msg.forkSeq)),
+          result: branch_timeline(msg.entriesJson, msg.branchesJson, msg.branchId),
         });
         break;
       case "smooth":
@@ -102,7 +112,7 @@ self.onmessage = async (ev: MessageEvent<InMsg>) => {
     self.postMessage({
       id: msg.id,
       ok: false,
-      error: e instanceof Error ? e.message : String(e),
+      error: e instanceof Error ? e.message : "worker failure",
     });
   }
 };

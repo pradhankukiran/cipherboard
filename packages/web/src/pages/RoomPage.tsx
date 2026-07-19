@@ -5,7 +5,9 @@ import { CanvasBoard, exportPng } from "../components/CanvasBoard";
 import { Participants } from "../components/Participants";
 import { Timeline } from "../components/Timeline";
 import { loadIdentity } from "../crypto/keystore";
+import { fingerprintFromSpkiB64, verifyFingerprint } from "../crypto/keys";
 import { COLORS } from "../lib/draw";
+import { inviteShareUrl } from "../lib/api";
 import { useRoom, type RoomSession } from "../hooks/useRoom";
 import { identityCache } from "./LandingPage";
 
@@ -21,7 +23,6 @@ type Meta = {
   inviteCode?: string;
   hostFingerprint?: string;
   hostPublicKeySpki?: string;
-  epoch: number;
 };
 
 export function RoomPage() {
@@ -32,6 +33,7 @@ export function RoomPage() {
   const [color, setColor] = useState(COLORS[0]!);
   const [width, setWidth] = useState(3);
   const [copied, setCopied] = useState(false);
+  const [hostFp, setHostFp] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -39,28 +41,72 @@ export function RoomPage() {
       try {
         const raw = sessionStorage.getItem(`cb:${roomId}`);
         const meta = raw ? (JSON.parse(raw) as Meta) : null;
-        let privateKey = identityCache.get(roomId) ?? null;
         const stored = await loadIdentity(roomId);
-        if (!privateKey && stored) privateKey = stored.privateKey;
-        if (!meta || !privateKey) {
+        let privateKey = identityCache.get(roomId) ?? stored?.privateKey ?? null;
+
+        const resolved: Meta | null = meta
+          ? meta
+          : stored
+            ? {
+                roomId: stored.roomId,
+                participantId: stored.participantId,
+                sessionToken: stored.sessionToken,
+                displayName: stored.displayName,
+                role: stored.role,
+                publicKeySpkiB64: stored.publicKeySpkiB64,
+                fingerprint: stored.fingerprint,
+                branchId: stored.branchId ?? "",
+                inviteCode: stored.inviteCode,
+                hostFingerprint: stored.hostFingerprint,
+                hostPublicKeySpki: stored.hostPublicKeySpki,
+              }
+            : null;
+
+        if (!resolved || !privateKey) {
           setLoadError(
             "Missing local session keys. Create or join the room again from this browser.",
           );
           return;
         }
+
+        const fpOk = await verifyFingerprint(
+          resolved.publicKeySpkiB64,
+          resolved.fingerprint,
+        );
+        if (!fpOk) {
+          const recomputed = await fingerprintFromSpkiB64(resolved.publicKeySpkiB64);
+          resolved.fingerprint = recomputed;
+        }
+
+        if (resolved.hostPublicKeySpki) {
+          const hfp = await fingerprintFromSpkiB64(resolved.hostPublicKeySpki);
+          if (
+            resolved.hostFingerprint &&
+            !(await verifyFingerprint(
+              resolved.hostPublicKeySpki,
+              resolved.hostFingerprint,
+            ))
+          ) {
+            setLoadError("Host key fingerprint mismatch — possible key substitution.");
+            return;
+          }
+          if (!cancelled) setHostFp(hfp);
+        } else if (resolved.hostFingerprint) {
+          if (!cancelled) setHostFp(resolved.hostFingerprint);
+        }
+
         if (cancelled) return;
         setSession({
-          roomId: meta.roomId,
-          participantId: meta.participantId,
-          sessionToken: meta.sessionToken,
-          displayName: meta.displayName,
-          role: meta.role,
-          publicKeySpkiB64: meta.publicKeySpkiB64,
-          fingerprint: meta.fingerprint,
+          roomId: resolved.roomId,
+          participantId: resolved.participantId,
+          sessionToken: resolved.sessionToken,
+          displayName: resolved.displayName,
+          role: resolved.role,
+          publicKeySpkiB64: resolved.publicKeySpkiB64,
+          fingerprint: resolved.fingerprint,
           privateKey,
-          branchId: meta.branchId || stored?.inviteCode ? meta.branchId : meta.branchId,
-          inviteCode: meta.inviteCode,
-          epoch: meta.epoch ?? 0,
+          branchId: resolved.branchId,
+          inviteCode: resolved.inviteCode,
         });
       } catch (e) {
         setLoadError(e instanceof Error ? e.message : String(e));
@@ -78,7 +124,7 @@ export function RoomPage() {
 
   const shareText = useMemo(() => {
     if (!session?.inviteCode) return "";
-    return `${location.origin}/?join=${session.roomId}&code=${session.inviteCode}`;
+    return inviteShareUrl(session.roomId, session.inviteCode);
   }, [session]);
 
   if (loadError) {
@@ -105,10 +151,8 @@ export function RoomPage() {
   }
 
   if (!approved) {
-    const hostFp =
-      room.participants.find((p) => p.role === "host")?.fingerprint ??
-      (JSON.parse(sessionStorage.getItem(`cb:${roomId}`) || "{}") as Meta)
-        .hostFingerprint;
+    const displayHostFp =
+      room.participants.find((p) => p.role === "host")?.fingerprint ?? hostFp;
     return (
       <div className="app-shell">
         <TopBar status={room.status} title="Waiting room" />
@@ -123,10 +167,10 @@ export function RoomPage() {
               <strong>Your safety code</strong>
               <div className="fingerprint">{session.fingerprint}</div>
             </div>
-            {hostFp ? (
+            {displayHostFp ? (
               <div>
                 <strong>Host safety code (compare out-of-band)</strong>
-                <div className="fingerprint">{hostFp}</div>
+                <div className="fingerprint">{displayHostFp}</div>
                 <p className="muted">
                   Codes are not verified identity until you confirm them with the
                   host through a trusted channel.
@@ -135,7 +179,7 @@ export function RoomPage() {
             ) : null}
             <p>
               Status: <strong>{room.myStatus}</strong> · Connection:{" "}
-              {room.status}
+              {room.status === "connecting" ? "reconnecting" : room.status}
             </p>
             {room.myStatus === "rejected" ? (
               <div className="error-box">The host rejected your request.</div>
@@ -153,7 +197,13 @@ export function RoomPage() {
       <TopBar
         status={room.status}
         title={session.displayName}
-        subtitle={room.locked ? "room locked" : `epoch ${room.localEpoch}`}
+        subtitle={
+          room.locked
+            ? "room locked"
+            : room.status === "connecting"
+              ? "reconnecting"
+              : "encrypted"
+        }
       />
       <div className="board-layout">
         <div className="toolbar" role="toolbar" aria-label="Drawing tools">
@@ -277,7 +327,8 @@ export function RoomPage() {
             </div>
             <div className="warn-box">
               Approved peers can screenshot. Encryption protects against the
-              server, not endpoints.
+              server, not endpoints. Safety codes are not verified identity until
+              compared out of band.
             </div>
             {room.error ? <div className="error-box">{room.error}</div> : null}
           </div>

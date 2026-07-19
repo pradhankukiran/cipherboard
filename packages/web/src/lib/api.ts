@@ -64,7 +64,30 @@ export async function joinRoom(input: {
   return parseJson(res);
 }
 
-export function wsUrl(token: string): string {
+export function wsUrl(): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${location.host}/ws?token=${encodeURIComponent(token)}`;
+  return `${proto}//${location.host}/ws`;
+}
+
+/** Sec-WebSocket-Protocol: fixed app protocol + auth.<hex-token> (not in URL). */
+export function wsProtocols(sessionToken: string): string[] {
+  return ["cipherboard", `auth.${sessionToken}`];
+}
+
+export function inviteShareUrl(roomId: string, inviteCode: string): string {
+  return `${location.origin}/#join=${encodeURIComponent(roomId)}&code=${encodeURIComponent(inviteCode)}`;
+}
+
+export function readInviteFragment(): { roomId: string; code: string } | null {
+  const hash = location.hash.replace(/^#/, "");
+  if (!hash) return null;
+  const params = new URLSearchParams(hash);
+  const roomId = params.get("join");
+  const code = params.get("code");
+  // Clear fragment so invite secret does not linger in history/logs
+  if (roomId || code) {
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+  if (roomId && code) return { roomId, code };
+  return null;
 }

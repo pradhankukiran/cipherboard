@@ -2,21 +2,12 @@ import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { generateIdentity } from "../crypto/keys";
 import { saveIdentity } from "../crypto/keystore";
-import { createRoom, joinRoom } from "../lib/api";
+import { createRoom, joinRoom, readInviteFragment } from "../lib/api";
 import { TopBar } from "../components/TopBar";
 
 export function LandingPage() {
   const nav = useNavigate();
-  const prefill = (() => {
-    try {
-      const raw = sessionStorage.getItem("cb:prefill");
-      if (!raw) return null;
-      sessionStorage.removeItem("cb:prefill");
-      return JSON.parse(raw) as { roomId: string; code: string };
-    } catch {
-      return null;
-    }
-  })();
+  const prefill = readInviteFragment();
   const [name, setName] = useState("");
   const [roomId, setRoomId] = useState(prefill?.roomId ?? "");
   const [invite, setInvite] = useState(prefill?.code ?? "");
@@ -34,6 +25,17 @@ export function LandingPage() {
         publicKeySpki: id.publicKeySpkiB64,
         fingerprint: id.fingerprint,
       });
+      const meta = {
+        roomId: res.room_id,
+        participantId: res.participant_id,
+        sessionToken: res.session_token,
+        displayName: name.trim() || "Host",
+        role: "host",
+        publicKeySpkiB64: id.publicKeySpkiB64,
+        fingerprint: id.fingerprint,
+        branchId: res.branch_id,
+        inviteCode: res.invite_code,
+      };
       await saveIdentity({
         roomId: res.room_id,
         participantId: res.participant_id,
@@ -41,28 +43,13 @@ export function LandingPage() {
         publicKey: id.publicKey,
         publicKeySpkiB64: id.publicKeySpkiB64,
         fingerprint: id.fingerprint,
-        displayName: name.trim() || "Host",
+        displayName: meta.displayName,
         sessionToken: res.session_token,
         role: "host",
         inviteCode: res.invite_code,
-        epoch: 0,
+        branchId: res.branch_id,
       });
-      sessionStorage.setItem(
-        `cb:${res.room_id}`,
-        JSON.stringify({
-          roomId: res.room_id,
-          participantId: res.participant_id,
-          sessionToken: res.session_token,
-          displayName: name.trim() || "Host",
-          role: "host",
-          publicKeySpkiB64: id.publicKeySpkiB64,
-          fingerprint: id.fingerprint,
-          branchId: res.branch_id,
-          inviteCode: res.invite_code,
-          epoch: 0,
-        }),
-      );
-      // Keep CryptoKey in memory via module cache
+      sessionStorage.setItem(`cb:${res.room_id}`, JSON.stringify(meta));
       identityCache.set(res.room_id, id.privateKey);
       nav(`/room/${res.room_id}`);
     } catch (err) {
@@ -85,6 +72,18 @@ export function LandingPage() {
         publicKeySpki: id.publicKeySpkiB64,
         fingerprint: id.fingerprint,
       });
+      const meta = {
+        roomId: res.room_id,
+        participantId: res.participant_id,
+        sessionToken: res.session_token,
+        displayName: name.trim() || "Guest",
+        role: "guest",
+        publicKeySpkiB64: id.publicKeySpkiB64,
+        fingerprint: id.fingerprint,
+        branchId: "",
+        hostFingerprint: res.host_fingerprint,
+        hostPublicKeySpki: res.host_public_key_spki,
+      };
       await saveIdentity({
         roomId: res.room_id,
         participantId: res.participant_id,
@@ -92,27 +91,13 @@ export function LandingPage() {
         publicKey: id.publicKey,
         publicKeySpkiB64: id.publicKeySpkiB64,
         fingerprint: id.fingerprint,
-        displayName: name.trim() || "Guest",
+        displayName: meta.displayName,
         sessionToken: res.session_token,
         role: "guest",
-        epoch: 0,
+        hostFingerprint: res.host_fingerprint,
+        hostPublicKeySpki: res.host_public_key_spki,
       });
-      sessionStorage.setItem(
-        `cb:${res.room_id}`,
-        JSON.stringify({
-          roomId: res.room_id,
-          participantId: res.participant_id,
-          sessionToken: res.session_token,
-          displayName: name.trim() || "Guest",
-          role: "guest",
-          publicKeySpkiB64: id.publicKeySpkiB64,
-          fingerprint: id.fingerprint,
-          branchId: "",
-          hostFingerprint: res.host_fingerprint,
-          hostPublicKeySpki: res.host_public_key_spki,
-          epoch: 0,
-        }),
-      );
+      sessionStorage.setItem(`cb:${res.room_id}`, JSON.stringify(meta));
       identityCache.set(res.room_id, id.privateKey);
       nav(`/room/${res.room_id}`);
     } catch (err) {
@@ -205,5 +190,4 @@ export function LandingPage() {
   );
 }
 
-/** In-memory private key cache (CryptoKey cannot go in sessionStorage). */
 export const identityCache = new Map<string, CryptoKey>();

@@ -48,14 +48,36 @@ export async function fingerprintFromSpki(spki: ArrayBuffer): Promise<string> {
   const hex = [...new Uint8Array(digest)]
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
-  // Group for human comparison: abcd efgh ...
   return hex.match(/.{1,4}/g)?.join(" ") ?? hex;
+}
+
+export async function fingerprintFromSpkiB64(spkiB64: string): Promise<string> {
+  const spki = b64Decode(spkiB64);
+  const copy = spki.buffer.slice(
+    spki.byteOffset,
+    spki.byteOffset + spki.byteLength,
+  );
+  return fingerprintFromSpki(copy);
+}
+
+/** Recompute fingerprint from SPKI and compare to claimed value. */
+export async function verifyFingerprint(
+  spkiB64: string,
+  claimed: string,
+): Promise<boolean> {
+  if (!claimed || !spkiB64) return false;
+  const actual = await fingerprintFromSpkiB64(spkiB64);
+  return normalizeFp(actual) === normalizeFp(claimed);
+}
+
+function normalizeFp(fp: string): string {
+  return fp.replace(/\s+/g, "").toLowerCase();
 }
 
 export async function generateIdentity(): Promise<IdentityKeys> {
   const pair = await crypto.subtle.generateKey(
     { name: "ECDH", namedCurve: ECDH_CURVE },
-    false, // non-extractable private key
+    false,
     ["deriveBits"],
   );
   const spki = await crypto.subtle.exportKey("spki", pair.publicKey);
@@ -82,8 +104,7 @@ export async function importPeerPublicKey(spkiB64: string): Promise<CryptoKey> {
 
 /**
  * Derive a non-extractable AES-256-GCM key via ECDH + HKDF-SHA-256.
- * info binds room and both participant ids (sorted for direction independence of base secret,
- * then direction-specific salt for message keys sender->recipient).
+ * Direction-bound info: room + sender + recipient (pairwise, no epoch).
  */
 export async function deriveMessageKey(params: {
   privateKey: CryptoKey;
@@ -91,7 +112,6 @@ export async function deriveMessageKey(params: {
   roomId: string;
   senderId: string;
   recipientId: string;
-  epoch: number;
 }): Promise<CryptoKey> {
   const bits = await crypto.subtle.deriveBits(
     { name: "ECDH", public: params.peerPublicKey },
@@ -104,7 +124,7 @@ export async function deriveMessageKey(params: {
   ]);
 
   const info = new TextEncoder().encode(
-    `cipherboard/v${PROTOCOL_VERSION}/msg/${params.roomId}/${params.senderId}/${params.recipientId}/epoch/${params.epoch}`,
+    `cipherboard/v${PROTOCOL_VERSION}/msg/${params.roomId}/${params.senderId}/${params.recipientId}`,
   );
   const salt = new TextEncoder().encode("cipherboard-hkdf-salt-v1");
 
@@ -117,7 +137,7 @@ export async function deriveMessageKey(params: {
     },
     ikm,
     { name: "AES-GCM", length: AES_LENGTH },
-    false, // non-extractable
+    false,
     ["encrypt", "decrypt"],
   );
 }
@@ -129,7 +149,6 @@ export type AadContext = {
   recipientId: string;
   eventId: string;
   branchId: string;
-  seq?: number;
 };
 
 export function encodeAad(ctx: AadContext): { bytes: Uint8Array; json: string } {
@@ -140,7 +159,6 @@ export function encodeAad(ctx: AadContext): { bytes: Uint8Array; json: string } 
     to: ctx.recipientId,
     event: ctx.eventId,
     branch: ctx.branchId,
-    ...(ctx.seq !== undefined ? { seq: ctx.seq } : {}),
   };
   const json = JSON.stringify(obj);
   return { bytes: new TextEncoder().encode(json), json };
@@ -151,7 +169,7 @@ export async function encryptForRecipient(
   plaintext: Uint8Array,
   aad: AadContext,
 ): Promise<{ ivB64: string; ciphertextB64: string; aadJson: string }> {
-  const iv = crypto.getRandomValues(new Uint8Array(12)); // 96-bit
+  const iv = crypto.getRandomValues(new Uint8Array(12));
   const { bytes: aadBytes, json: aadJson } = encodeAad(aad);
   const ct = await crypto.subtle.encrypt(
     {

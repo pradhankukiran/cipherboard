@@ -1,4 +1,4 @@
-import type { BoardEvent, BoardSnapshot, Point, TimelineEntry } from "./types";
+import type { BoardEvent, BoardSnapshot, Branch, Point, TimelineEntry } from "./types";
 
 type Pending = {
   resolve: (v: unknown) => void;
@@ -28,8 +28,8 @@ function getWorker(): Worker {
       if (ok) p.resolve(result);
       else p.reject(new Error(error || "worker error"));
     };
-    worker.onerror = (e) => {
-      console.error("board worker error", e.message);
+    worker.onerror = () => {
+      // do not log payload details
     };
   }
   return worker;
@@ -65,39 +65,69 @@ export async function decodeEvent(encoded: string): Promise<BoardEvent> {
   return JSON.parse(json) as BoardEvent;
 }
 
-export async function replayThrough(
-  entries: TimelineEntry[],
-  throughSeq: number,
-  authorFilter?: string | null,
-): Promise<BoardSnapshot> {
-  await initBoardWorker();
-  const payload = entries.map((e) => ({
+function toWorkerEntries(entries: TimelineEntry[]) {
+  return entries.map((e) => ({
     seq: e.seq,
     event_id: e.eventId,
     sender_id: e.senderId,
     branch_id: e.branchId,
     event: e.event,
   }));
+}
+
+function toWorkerBranches(branches: Branch[]) {
+  return branches.map((b) => ({
+    id: b.id,
+    parent_branch_id: b.parent_branch_id ?? null,
+    fork_seq: b.fork_seq ?? null,
+  }));
+}
+
+export async function replayBranch(
+  entries: TimelineEntry[],
+  branches: Branch[],
+  branchId: string,
+  throughSeq: number,
+  authorFilter?: string | null,
+): Promise<BoardSnapshot> {
+  await initBoardWorker();
   const json = await call<string>({
-    op: "replay",
-    entriesJson: JSON.stringify(payload),
+    op: "replay_branch",
+    entriesJson: JSON.stringify(toWorkerEntries(entries)),
+    branchesJson: JSON.stringify(toWorkerBranches(branches)),
+    branchId,
     throughSeq,
     authorFilter: authorFilter ?? null,
   });
   return JSON.parse(json) as BoardSnapshot;
 }
 
-export async function smoothPoints(
-  points: Point[],
-  iterations = 1,
-): Promise<Point[]> {
+export async function branchTimeline(
+  entries: TimelineEntry[],
+  branches: Branch[],
+  branchId: string,
+): Promise<TimelineEntry[]> {
   await initBoardWorker();
   const json = await call<string>({
-    op: "smooth",
-    pointsJson: JSON.stringify(points),
-    iterations,
+    op: "branch_timeline",
+    entriesJson: JSON.stringify(toWorkerEntries(entries)),
+    branchesJson: JSON.stringify(toWorkerBranches(branches)),
+    branchId,
   });
-  return JSON.parse(json) as Point[];
+  const raw = JSON.parse(json) as Array<{
+    seq: number;
+    event_id: string;
+    sender_id: string;
+    branch_id: string;
+    event: BoardEvent;
+  }>;
+  return raw.map((e) => ({
+    seq: e.seq,
+    eventId: e.event_id,
+    senderId: e.sender_id,
+    branchId: e.branch_id,
+    event: e.event,
+  }));
 }
 
 export async function simplifyPoints(

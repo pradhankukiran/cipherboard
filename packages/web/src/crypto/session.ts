@@ -1,8 +1,10 @@
+import { assertAadMatches, parseAadJson } from "./aad";
 import {
   decryptFromSender,
   deriveMessageKey,
   encryptForRecipient,
   importPeerPublicKey,
+  verifyFingerprint,
   PROTOCOL_VERSION,
   type AadContext,
 } from "./keys";
@@ -10,18 +12,18 @@ import {
 export type PeerInfo = {
   id: string;
   publicKeySpki: string;
+  fingerprint: string;
   status: string;
 };
 
 /**
- * Manages pairwise message keys. On epoch bump (participant removed),
- * future keys are re-derived so removed members cannot decrypt new events.
+ * Pairwise message keys via ECDH + HKDF. Removed peers are simply excluded
+ * from recipient lists; they cannot derive remaining pairs' secrets.
  */
 export class CryptoSession {
   private privateKey: CryptoKey;
   private roomId: string;
   private selfId: string;
-  private epoch: number;
   private keyCache = new Map<string, CryptoKey>();
   private seenEventIds = new Set<string>();
   private maxSeen = 10_000;
@@ -30,30 +32,18 @@ export class CryptoSession {
     privateKey: CryptoKey;
     roomId: string;
     selfId: string;
-    epoch: number;
   }) {
     this.privateKey = opts.privateKey;
     this.roomId = opts.roomId;
     this.selfId = opts.selfId;
-    this.epoch = opts.epoch;
-  }
-
-  getEpoch(): number {
-    return this.epoch;
-  }
-
-  /** Call when a participant is removed so future traffic uses new keys. */
-  bumpEpoch(): number {
-    this.epoch += 1;
-    this.keyCache.clear();
-    return this.epoch;
   }
 
   private cacheKey(peerId: string, direction: "send" | "recv"): string {
-    return `${this.epoch}:${direction}:${peerId}`;
+    return `${direction}:${peerId}`;
   }
 
   async getSendKey(peer: PeerInfo): Promise<CryptoKey> {
+    await this.assertPeerKey(peer);
     const ck = this.cacheKey(peer.id, "send");
     const hit = this.keyCache.get(ck);
     if (hit) return hit;
@@ -64,13 +54,13 @@ export class CryptoSession {
       roomId: this.roomId,
       senderId: this.selfId,
       recipientId: peer.id,
-      epoch: this.epoch,
     });
     this.keyCache.set(ck, key);
     return key;
   }
 
   async getRecvKey(peer: PeerInfo): Promise<CryptoKey> {
+    await this.assertPeerKey(peer);
     const ck = this.cacheKey(peer.id, "recv");
     const hit = this.keyCache.get(ck);
     if (hit) return hit;
@@ -81,20 +71,32 @@ export class CryptoSession {
       roomId: this.roomId,
       senderId: peer.id,
       recipientId: this.selfId,
-      epoch: this.epoch,
     });
     this.keyCache.set(ck, key);
     return key;
   }
 
-  rememberEvent(eventId: string): boolean {
-    if (this.seenEventIds.has(eventId)) return false;
-    this.seenEventIds.add(eventId);
+  private async assertPeerKey(peer: PeerInfo): Promise<void> {
+    if (!peer.publicKeySpki) throw new Error("missing peer key");
+    const ok = await verifyFingerprint(peer.publicKeySpki, peer.fingerprint);
+    if (!ok) throw new Error("peer fingerprint mismatch");
+  }
+
+  dropPeerKeys(peerId: string): void {
+    this.keyCache.delete(this.cacheKey(peerId, "send"));
+    this.keyCache.delete(this.cacheKey(peerId, "recv"));
+  }
+
+  hasSeen(eventKey: string): boolean {
+    return this.seenEventIds.has(eventKey);
+  }
+
+  markSeen(eventKey: string): void {
+    this.seenEventIds.add(eventKey);
     if (this.seenEventIds.size > this.maxSeen) {
       const first = this.seenEventIds.values().next().value as string | undefined;
       if (first) this.seenEventIds.delete(first);
     }
-    return true;
   }
 
   async sealForPeers(
@@ -147,15 +149,13 @@ export class CryptoSession {
     return out;
   }
 
-  /**
-   * Encrypt including a self-envelope when ownPublicSpki is provided.
-   */
   async sealForPeersIncludingSelf(
     plaintext: string,
     eventId: string,
     branchId: string,
     peers: PeerInfo[],
     ownPublicSpki: string,
+    ownFingerprint: string,
   ): Promise<
     Array<{
       recipientId: string;
@@ -170,31 +170,46 @@ export class CryptoSession {
       {
         id: this.selfId,
         publicKeySpki: ownPublicSpki,
+        fingerprint: ownFingerprint,
         status: "approved",
       },
     ];
-    // Dedupe by id
     const map = new Map(withSelf.map((p) => [p.id, p]));
-    return this.sealForPeers(
-      plaintext,
-      eventId,
-      branchId,
-      [...map.values()],
-    );
+    return this.sealForPeers(plaintext, eventId, branchId, [...map.values()]);
   }
 
-  async openEnvelope(
-    sender: PeerInfo,
-    ivB64: string,
-    ciphertextB64: string,
-    aadJson: string,
-    eventId: string,
-  ): Promise<string | null> {
-    if (!this.rememberEvent(`${sender.id}:${eventId}`)) {
-      return null; // duplicate
-    }
-    const key = await this.getRecvKey(sender);
-    const pt = await decryptFromSender(key, ivB64, ciphertextB64, aadJson);
+  /**
+   * Validate outer metadata against AAD, then decrypt. Seen-mark only after success.
+   */
+  async openEnvelope(params: {
+    sender: PeerInfo;
+    ivB64: string;
+    ciphertextB64: string;
+    aadJson: string;
+    eventId: string;
+    branchId: string;
+    recipientId: string;
+  }): Promise<string | null> {
+    const eventKey = `${params.sender.id}:${params.eventId}:${params.recipientId}`;
+    if (this.hasSeen(eventKey)) return null;
+
+    const aad = parseAadJson(params.aadJson);
+    assertAadMatches(aad, {
+      roomId: this.roomId,
+      senderId: params.sender.id,
+      recipientId: params.recipientId,
+      eventId: params.eventId,
+      branchId: params.branchId,
+    });
+
+    const key = await this.getRecvKey(params.sender);
+    const pt = await decryptFromSender(
+      key,
+      params.ivB64,
+      params.ciphertextB64,
+      params.aadJson,
+    );
+    this.markSeen(eventKey);
     return new TextDecoder().decode(pt);
   }
 }

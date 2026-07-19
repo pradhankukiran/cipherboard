@@ -3,7 +3,7 @@
  */
 
 const DB_NAME = "cipherboard-keys";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE = "identities";
 
 export type StoredIdentity = {
@@ -17,7 +17,9 @@ export type StoredIdentity = {
   sessionToken: string;
   role: string;
   inviteCode?: string;
-  epoch: number;
+  branchId?: string;
+  hostFingerprint?: string;
+  hostPublicKeySpki?: string;
 };
 
 function openDb(): Promise<IDBDatabase> {
@@ -82,50 +84,5 @@ export async function deleteIdentity(roomId: string): Promise<void> {
     db.close();
   } catch {
     // ignore
-  }
-}
-
-export async function supportsStructuredCloneKeys(): Promise<boolean> {
-  try {
-    const pair = await crypto.subtle.generateKey(
-      { name: "ECDH", namedCurve: "P-256" },
-      false,
-      ["deriveBits"],
-    );
-    const db = await openDb();
-    const testId = "__probe__";
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE, "readwrite");
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.objectStore(STORE).put({
-        roomId: testId,
-        participantId: "probe",
-        privateKey: pair.privateKey,
-        publicKey: pair.publicKey,
-        publicKeySpkiB64: "",
-        fingerprint: "",
-        displayName: "",
-        sessionToken: "",
-        role: "",
-        epoch: 0,
-      });
-    });
-    const loaded = await new Promise<StoredIdentity | null>((resolve, reject) => {
-      const tx = db.transaction(STORE, "readonly");
-      const req = tx.objectStore(STORE).get(testId);
-      req.onsuccess = () => resolve((req.result as StoredIdentity) ?? null);
-      req.onerror = () => reject(req.error);
-    });
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE, "readwrite");
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.objectStore(STORE).delete(testId);
-    });
-    db.close();
-    return !!loaded?.privateKey && loaded.privateKey instanceof CryptoKey;
-  } catch {
-    return false;
   }
 }
