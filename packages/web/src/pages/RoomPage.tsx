@@ -1,9 +1,22 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Link, useParams } from "react-router-dom";
 import { TopBar } from "../components/TopBar";
 import { CanvasBoard, exportPng } from "../components/CanvasBoard";
 import { Participants } from "../components/Participants";
 import { Timeline } from "../components/Timeline";
+import {
+  IconCheck,
+  IconCopy,
+  IconDownload,
+  IconEraser,
+  IconLock,
+  IconPen,
+  IconRedo,
+  IconShield,
+  IconTrash,
+  IconUndo,
+  IconUnlock,
+} from "../components/icons";
 import { loadIdentity } from "../crypto/keystore";
 import { fingerprintFromSpkiB64, verifyFingerprint } from "../crypto/keys";
 import { COLORS } from "../lib/draw";
@@ -25,6 +38,11 @@ type Meta = {
   hostPublicKeySpki?: string;
 };
 
+function connectionLabel(status: string): string {
+  if (status === "connecting") return "reconnecting";
+  return status;
+}
+
 export function RoomPage() {
   const { roomId = "" } = useParams();
   const [session, setSession] = useState<RoomSession | null>(null);
@@ -34,6 +52,13 @@ export function RoomPage() {
   const [width, setWidth] = useState(3);
   const [copied, setCopied] = useState(false);
   const [hostFp, setHostFp] = useState<string | null>(null);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,7 +67,7 @@ export function RoomPage() {
         const raw = sessionStorage.getItem(`cb:${roomId}`);
         const meta = raw ? (JSON.parse(raw) as Meta) : null;
         const stored = await loadIdentity(roomId);
-        let privateKey = identityCache.get(roomId) ?? stored?.privateKey ?? null;
+        const privateKey = identityCache.get(roomId) ?? stored?.privateKey ?? null;
 
         const resolved: Meta | null = meta
           ? meta
@@ -121,19 +146,35 @@ export function RoomPage() {
   const isHost = session?.role === "host";
   const approved = room.myStatus === "approved";
   const scrubbing = room.scrubSeq !== null;
+  const canvasDisabled = scrubbing || room.status !== "open";
 
   const shareText = useMemo(() => {
     if (!session?.inviteCode) return "";
     return inviteShareUrl(session.roomId, session.inviteCode);
   }, [session]);
 
+  async function copyInvite() {
+    if (!session?.inviteCode) return;
+    const text = `Room: ${session.roomId}\nInvite: ${session.inviteCode}\n${shareText}`;
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    copiedTimer.current = setTimeout(() => setCopied(false), 1500);
+  }
+
   if (loadError) {
     return (
       <div className="app-shell">
         <TopBar />
-        <main className="landing">
-          <div className="error-box">{loadError}</div>
-          <Link to="/">Back</Link>
+        <main className="page-center" id="main">
+          <div className="error-box" role="alert">
+            {loadError}
+          </div>
+          <div className="page-actions">
+            <Link className="btn-link" to="/">
+              Back to home
+            </Link>
+          </div>
         </main>
       </div>
     );
@@ -143,7 +184,7 @@ export function RoomPage() {
     return (
       <div className="app-shell">
         <TopBar status="connecting" />
-        <main className="landing">
+        <main className="page-center" id="main" aria-busy="true">
           <p className="muted">Loading session…</p>
         </main>
       </div>
@@ -153,22 +194,58 @@ export function RoomPage() {
   if (!approved) {
     const displayHostFp =
       room.participants.find((p) => p.role === "host")?.fingerprint ?? hostFp;
+    const waitState =
+      room.myStatus === "rejected"
+        ? "rejected"
+        : room.error
+          ? "error"
+          : room.myStatus === "approved"
+            ? "approved"
+            : "waiting";
+
     return (
       <div className="app-shell">
         <TopBar status={room.status} title="Waiting room" />
-        <main className="waiting">
-          <h2>Waiting for host approval</h2>
-          <p className="muted">
-            You are in the waiting room. The host must approve you before you can
-            see or draw on the board.
-          </p>
-          <div className="panel stack">
+        <main className="waiting" id="main">
+          <header className="waiting-header">
+            <h2>Waiting for host approval</h2>
+            <p className="muted">
+              You are in the waiting room. The host must approve you before you can
+              see or draw on the board.
+            </p>
+          </header>
+
+          <div
+            className="waiting-progress"
+            data-state={waitState}
+            role="status"
+            aria-live="polite"
+          >
+            <span className="waiting-progress-pulse" aria-hidden />
             <div>
+              <strong>
+                {room.myStatus === "rejected"
+                  ? "Access rejected"
+                  : room.myStatus === "waiting"
+                    ? "Approval pending"
+                    : `Status: ${room.myStatus}`}
+              </strong>
+              <div className="muted">
+                Connection: {connectionLabel(room.status)}
+              </div>
+            </div>
+          </div>
+
+          <div className="waiting-codes">
+            <div className="waiting-code-block">
               <strong>Your safety code</strong>
               <div className="fingerprint">{session.fingerprint}</div>
+              <p className="muted">
+                Share this with the host if they ask you to verify identity.
+              </p>
             </div>
             {displayHostFp ? (
-              <div>
+              <div className="waiting-code-block">
                 <strong>Host safety code (compare out-of-band)</strong>
                 <div className="fingerprint">{displayHostFp}</div>
                 <p className="muted">
@@ -177,20 +254,38 @@ export function RoomPage() {
                 </p>
               </div>
             ) : null}
-            <p>
-              Status: <strong>{room.myStatus}</strong> · Connection:{" "}
-              {room.status === "connecting" ? "reconnecting" : room.status}
-            </p>
-            {room.myStatus === "rejected" ? (
-              <div className="error-box">The host rejected your request.</div>
-            ) : null}
-            {room.error ? <div className="error-box">{room.error}</div> : null}
           </div>
-          <Link to="/">Leave</Link>
+
+          {room.myStatus === "rejected" ? (
+            <div className="error-box" role="alert">
+              The host rejected your request.
+            </div>
+          ) : null}
+          {room.error ? (
+            <div className="error-box" role="alert">
+              {room.error}
+            </div>
+          ) : null}
+
+          <div className="waiting-actions">
+            <Link className="btn-link" to="/">
+              Leave
+            </Link>
+          </div>
         </main>
       </div>
     );
   }
+
+  const canvasStatus = scrubbing
+    ? "Viewing history — drawing paused"
+    : room.status === "connecting"
+      ? "Reconnecting…"
+      : room.status !== "open"
+        ? "Disconnected — drawing paused"
+        : room.locked
+          ? "Room locked"
+          : null;
 
   return (
     <div className="app-shell">
@@ -205,31 +300,37 @@ export function RoomPage() {
               : "encrypted"
         }
       />
-      <div className="board-layout">
+      <main className="board-layout" id="main">
         <div className="toolbar" role="toolbar" aria-label="Drawing tools">
-          <button
-            type="button"
-            className={tool === "pen" ? "primary" : undefined}
-            aria-pressed={tool === "pen"}
-            onClick={() => setTool("pen")}
-          >
-            Pen
-          </button>
-          <button
-            type="button"
-            className={tool === "eraser" ? "primary" : undefined}
-            aria-pressed={tool === "eraser"}
-            onClick={() => setTool("eraser")}
-          >
-            Eraser
-          </button>
-          <span className="row" aria-label="Colors">
+          <div className="toolbar-group" role="group" aria-label="Tool">
+            <button
+              type="button"
+              className={tool === "pen" ? "primary" : undefined}
+              aria-pressed={tool === "pen"}
+              onClick={() => setTool("pen")}
+            >
+              <IconPen />
+              Pen
+            </button>
+            <button
+              type="button"
+              className={tool === "eraser" ? "primary" : undefined}
+              aria-pressed={tool === "eraser"}
+              onClick={() => setTool("eraser")}
+            >
+              <IconEraser />
+              Eraser
+            </button>
+          </div>
+
+          <div className="toolbar-group" role="group" aria-label="Colors">
+            <span className="toolbar-group-label">Color</span>
             {COLORS.map((c) => (
               <button
                 key={c}
                 type="button"
-                className={`color-swatch ${color === c ? "active" : ""}`}
-                style={{ background: c }}
+                className={`color-swatch${color === c ? " active" : ""}`}
+                style={{ "--swatch": c } as CSSProperties}
                 aria-label={`Color ${c}`}
                 aria-pressed={color === c}
                 onClick={() => {
@@ -238,64 +339,89 @@ export function RoomPage() {
                 }}
               />
             ))}
-          </span>
-          <label className="row">
-            Width
-            <input
-              type="range"
-              min={1}
-              max={24}
-              value={width}
-              onChange={(e) => setWidth(Number(e.target.value))}
-            />
-          </label>
-          <button type="button" onClick={() => void room.undo()} disabled={scrubbing}>
-            Undo
-          </button>
-          <button type="button" onClick={() => void room.redo()} disabled={scrubbing}>
-            Redo
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              if (window.confirm("Clear the board for everyone on this branch?")) {
-                void room.clearBoard();
-              }
-            }}
-            disabled={scrubbing}
-          >
-            Clear
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              const url = exportPng(room.snapshot);
-              const a = document.createElement("a");
-              a.href = url;
-              a.download = `cipherboard-${session.roomId}.png`;
-              a.click();
-            }}
-          >
-            Export PNG
-          </button>
-          {isHost && session.inviteCode ? (
+          </div>
+
+          <div className="toolbar-group" role="group" aria-label="Stroke width">
+            <label className="toolbar-width">
+              Width
+              <input
+                type="range"
+                min={1}
+                max={24}
+                value={width}
+                aria-valuemin={1}
+                aria-valuemax={24}
+                aria-valuenow={width}
+                onChange={(e) => setWidth(Number(e.target.value))}
+              />
+              <span className="muted" aria-hidden>
+                {width}
+              </span>
+            </label>
+          </div>
+
+          <div className="toolbar-group" role="group" aria-label="Edit history">
             <button
               type="button"
-              onClick={async () => {
-                const text = `Room: ${session.roomId}\nInvite: ${session.inviteCode}\n${shareText}`;
-                await navigator.clipboard.writeText(text);
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1500);
+              onClick={() => void room.undo()}
+              disabled={scrubbing}
+            >
+              <IconUndo />
+              Undo
+            </button>
+            <button
+              type="button"
+              onClick={() => void room.redo()}
+              disabled={scrubbing}
+            >
+              <IconRedo />
+              Redo
+            </button>
+          </div>
+
+          <div className="toolbar-group" role="group" aria-label="Board">
+            <button
+              type="button"
+              className="danger"
+              onClick={() => {
+                if (window.confirm("Clear the board for everyone on this branch?")) {
+                  void room.clearBoard();
+                }
+              }}
+              disabled={scrubbing}
+            >
+              <IconTrash />
+              Clear
+            </button>
+          </div>
+
+          <div className="toolbar-group toolbar-group-end" role="group" aria-label="Room actions">
+            <button
+              type="button"
+              onClick={() => {
+                const url = exportPng(room.snapshot);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `cipherboard-${session.roomId}.png`;
+                a.click();
               }}
             >
-              {copied ? "Copied" : "Copy invite"}
+              <IconDownload />
+              Export PNG
             </button>
-          ) : null}
-          {isHost ? (
-            <button type="button" onClick={() => room.setLock(!room.locked)}>
-              {room.locked ? "Unlock room" : "Lock room"}
-            </button>
-          ) : null}
+            {isHost && session.inviteCode ? (
+              <button type="button" onClick={() => void copyInvite()}>
+                {copied ? <IconCheck /> : <IconCopy />}
+                {copied ? "Copied" : "Copy invite"}
+              </button>
+            ) : null}
+            {isHost ? (
+              <button type="button" onClick={() => room.setLock(!room.locked)}>
+                {room.locked ? <IconUnlock /> : <IconLock />}
+                {room.locked ? "Unlock room" : "Lock room"}
+              </button>
+            ) : null}
+          </div>
         </div>
 
         <CanvasBoard
@@ -304,7 +430,8 @@ export function RoomPage() {
           tool={tool}
           color={color}
           width={width}
-          disabled={scrubbing || room.status !== "open"}
+          disabled={canvasDisabled}
+          statusMessage={canvasStatus}
           onBegin={(id, c, w, t) => void room.beginStroke(id, c, w, t)}
           onPoints={(id, pts) => void room.addStrokePoints(id, pts)}
           onEnd={(id) => void room.endStroke(id)}
@@ -312,26 +439,41 @@ export function RoomPage() {
           onCursor={(x, y, v) => void room.sendCursor(x, y, v)}
         />
 
-        <aside className="sidebar">
-          <div className="stack">
-            <div>
-              <h3>Room</h3>
+        <aside className="sidebar" aria-label="Room details">
+          <section className="sidebar-section" aria-label="Room identity">
+            <h3>
+              <IconShield className="icon-sm" /> Room
+            </h3>
+            <div className="sidebar-id">
+              <span className="label">Room ID</span>
               <div className="fingerprint">{session.roomId}</div>
-              {session.inviteCode ? (
-                <p className="muted">Invite: {session.inviteCode}</p>
-              ) : null}
             </div>
-            <div>
-              <h3>Your safety code</h3>
+            {session.inviteCode ? (
+              <div className="sidebar-id">
+                <span className="label">Invite</span>
+                <div className="fingerprint">Invite: {session.inviteCode}</div>
+              </div>
+            ) : null}
+            <div className="sidebar-id">
+              <span className="label">Your safety code</span>
               <div className="fingerprint">{session.fingerprint}</div>
             </div>
-            <div className="warn-box">
-              Approved peers can screenshot. Encryption protects against the
-              server, not endpoints. Safety codes are not verified identity until
-              compared out of band.
-            </div>
-            {room.error ? <div className="error-box">{room.error}</div> : null}
-          </div>
+            {room.locked ? (
+              <div className="warn-box" role="status">
+                Room is locked. New participants cannot join until unlocked.
+              </div>
+            ) : null}
+            <p className="sidebar-caveat">
+              Server cannot read the board. Approved peers can still screenshot.
+              Compare safety codes out of band.
+            </p>
+            {room.error ? (
+              <div className="error-box" role="alert">
+                {room.error}
+              </div>
+            ) : null}
+          </section>
+
           <Participants
             participants={room.participants}
             selfId={session.participantId}
@@ -354,7 +496,7 @@ export function RoomPage() {
           onBranch={room.setActiveBranchId}
           onFork={(name, seq) => void room.forkBranch(name, seq)}
         />
-      </div>
+      </main>
     </div>
   );
 }

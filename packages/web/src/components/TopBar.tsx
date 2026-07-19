@@ -1,35 +1,42 @@
 import type { ConnStatus } from "../lib/types";
 
+function statusLabel(status: ConnStatus): string {
+  if (status === "open") return "connected";
+  if (status === "connecting") return "connecting";
+  if (status === "closed") return "disconnected";
+  return "error";
+}
+
+function statusDot(status: ConnStatus): string {
+  if (status === "open") return "ok";
+  if (status === "connecting") return "warn";
+  if (status === "error") return "err";
+  return "";
+}
+
 export function TopBar(props: {
   title?: string;
   status?: ConnStatus;
   subtitle?: string;
 }) {
-  const dot =
-    props.status === "open"
-      ? "ok"
-      : props.status === "connecting"
-        ? "warn"
-        : props.status === "error"
-          ? "err"
-          : "";
   return (
-    <header className="topbar">
-      <div className="row">
+    <header className="topbar" role="banner">
+      <div className="topbar-brand">
         <h1>Cipherboard</h1>
-        {props.title ? <span className="muted">/ {props.title}</span> : null}
+        {props.title ? (
+          <span className="topbar-title" title={props.title}>
+            / {props.title}
+          </span>
+        ) : null}
       </div>
-      <div className="row muted">
+      <div className="topbar-meta">
         {props.status ? (
-          <span>
-            <span className={`status-dot ${dot}`} aria-hidden />
-            {props.status === "open"
-              ? "connected"
-              : props.status === "connecting"
-                ? "connecting"
-                : props.status === "closed"
-                  ? "disconnected"
-                  : "error"}
+          <span className="topbar-status" aria-live="polite">
+            <span
+              className={`status-dot ${statusDot(props.status)}`}
+              aria-hidden
+            />
+            {statusLabel(props.status)}
           </span>
         ) : null}
         {props.subtitle ? <span>{props.subtitle}</span> : null}

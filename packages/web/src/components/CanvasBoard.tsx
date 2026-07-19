@@ -29,6 +29,7 @@ export function CanvasBoard(props: {
   color: string;
   width: number;
   disabled?: boolean;
+  statusMessage?: string | null;
   onBegin: (id: string, color: string, width: number, tool: string) => void;
   onPoints: (id: string, points: Point[]) => void;
   onEnd: (id: string) => void;
@@ -227,7 +228,16 @@ export function CanvasBoard(props: {
   };
 
   return (
-    <div className="canvas-wrap" ref={wrapRef}>
+    <div
+      className="canvas-wrap"
+      ref={wrapRef}
+      data-disabled={props.disabled ? "true" : "false"}
+    >
+      {props.statusMessage ? (
+        <div className="canvas-banner" role="status">
+          {props.statusMessage}
+        </div>
+      ) : null}
       <canvas
         ref={canvasRef}
         role="img"

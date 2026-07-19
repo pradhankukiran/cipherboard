@@ -1,4 +1,5 @@
 import type { Participant } from "../lib/types";
+import { IconUsers } from "./icons";
 
 export function Participants(props: {
   participants: Participant[];
@@ -12,44 +13,32 @@ export function Participants(props: {
   const approved = props.participants.filter((p) => p.status === "approved");
 
   return (
-    <section aria-label="Participants">
-      <h3>Participants ({approved.length}/8)</h3>
-      <div className="stack">
-        {approved.map((p) => (
-          <div key={p.id} className="participant">
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <strong>
-                {p.display_name}
-                {p.id === props.selfId ? " (you)" : ""}
-                {p.role === "host" ? " · host" : ""}
-              </strong>
-              {props.isHost && p.id !== props.selfId && p.role !== "host" ? (
-                <button
-                  type="button"
-                  className="danger"
-                  onClick={() => props.onRemove(p.id)}
-                >
-                  Remove
-                </button>
-              ) : null}
-            </div>
-            <div className="fingerprint" title="Safety code — compare out-of-band">
-              {p.fingerprint}
-            </div>
-          </div>
-        ))}
-      </div>
-
+    <section className="participants" aria-label="Participants">
       {waiting.length > 0 ? (
-        <>
-          <h3 style={{ marginTop: "1rem" }}>Waiting room</h3>
-          <div className="stack">
+        <div className="stack-sm" aria-label="Waiting room">
+          <div className="waiting-list-header">
+            <h4>Waiting for approval</h4>
+            <span className="badge badge-attention" aria-live="polite">
+              {waiting.length} waiting
+            </span>
+          </div>
+          <div className="stack-sm">
             {waiting.map((p) => (
-              <div key={p.id} className="participant">
-                <strong>{p.display_name}</strong>
-                <div className="fingerprint">{p.fingerprint}</div>
+              <div key={p.id} className="participant waiting-item">
+                <div className="participant-head">
+                  <div>
+                    <div className="participant-name">{p.display_name}</div>
+                    <div className="participant-meta">Needs host approval</div>
+                  </div>
+                </div>
+                <div
+                  className="fingerprint"
+                  title="Safety code — compare out-of-band"
+                >
+                  {p.fingerprint}
+                </div>
                 {props.isHost ? (
-                  <div className="row">
+                  <div className="participant-actions">
                     <button
                       type="button"
                       className="primary"
@@ -67,8 +56,52 @@ export function Participants(props: {
               </div>
             ))}
           </div>
-        </>
+        </div>
       ) : null}
+
+      <div className="stack-sm">
+        <div className="participants-heading">
+          <h3>
+            <IconUsers className="icon-sm" /> In room ({approved.length}/8)
+          </h3>
+        </div>
+        {approved.length === 0 ? (
+          <div className="empty-state">No approved participants yet.</div>
+        ) : (
+          <div className="stack-sm">
+            {approved.map((p) => (
+              <div key={p.id} className="participant">
+                <div className="participant-head">
+                  <div>
+                    <div className="participant-name">
+                      {p.display_name}
+                      {p.id === props.selfId ? " (you)" : ""}
+                    </div>
+                    <div className="participant-meta">
+                      {p.role === "host" ? "Host" : "Participant"}
+                    </div>
+                  </div>
+                  {props.isHost && p.id !== props.selfId && p.role !== "host" ? (
+                    <button
+                      type="button"
+                      className="danger"
+                      onClick={() => props.onRemove(p.id)}
+                    >
+                      Remove
+                    </button>
+                  ) : null}
+                </div>
+                <div
+                  className="fingerprint"
+                  title="Safety code — compare out-of-band"
+                >
+                  {p.fingerprint}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </section>
   );
 }
