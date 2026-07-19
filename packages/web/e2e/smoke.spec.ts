@@ -1,4 +1,4 @@
-import { expect, test, type Browser, type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 async function createHost(page: Page, name: string) {
   await page.goto("/");
@@ -37,6 +37,18 @@ async function drawStroke(page: Page) {
   await page.mouse.up();
 }
 
+/** Timeline scrub max reflects durable events on the active branch. */
+async function scrubMax(page: Page): Promise<number> {
+  const scrub = page.locator("#scrub");
+  await expect(scrub).toBeVisible({ timeout: 15000 });
+  await expect
+    .poll(async () => Number((await scrub.getAttribute("max")) ?? "0"), {
+      timeout: 20000,
+    })
+    .toBeGreaterThan(0);
+  return Number((await scrub.getAttribute("max")) ?? "0");
+}
+
 test.describe("cipherboard flows", () => {
   test("host approve, draw sync, time travel, remove", async ({ browser }) => {
     const hostCtx = await browser.newContext();
@@ -65,29 +77,45 @@ test.describe("cipherboard flows", () => {
       timeout: 25000,
     });
 
-    // Drawing sync host -> guests
+    // Drawing sync host -> GuestOne (observable timeline advance)
+    const g1Before = Number((await g1.locator("#scrub").getAttribute("max")) ?? "0");
     await drawStroke(host);
-    await host.waitForTimeout(1500);
-    // Time travel slider present
-    await expect(host.getByLabel("Scrub timeline")).toBeVisible();
-    const scrub = host.locator("#scrub");
-    const max = await scrub.getAttribute("max");
-    expect(Number(max)).toBeGreaterThan(0);
+    await expect
+      .poll(async () => Number((await g1.locator("#scrub").getAttribute("max")) ?? "0"), {
+        timeout: 20000,
+      })
+      .toBeGreaterThan(g1Before);
+
+    const hostMax = await scrubMax(host);
+    expect(hostMax).toBeGreaterThan(0);
 
     // Scrub to 0 then live
-    await scrub.fill("0");
+    await host.locator("#scrub").fill("0");
     await host.getByRole("button", { name: "Jump to live" }).click();
+    await expect(host.getByText(/live/i)).toBeVisible();
 
-    // Fork
+    // Fork: wait for option fork-e2e, select it, inherited timeline non-empty
     host.once("dialog", async (d) => {
       await d.accept("fork-e2e");
     });
     await host.getByRole("button", { name: "Fork from here" }).click();
-    await expect(host.locator("select").filter({ hasText: "fork" }).or(host.getByText("fork-e2e"))).toBeVisible({
-      timeout: 10000,
-    }).catch(() => {
-      // branch select may list name
+
+    const branchSelect = host.locator("label", { hasText: "Branch" }).locator("select");
+    await expect(branchSelect.locator('option', { hasText: "fork-e2e" })).toHaveCount(1, {
+      timeout: 15000,
     });
+    const forkValue = await branchSelect
+      .locator('option', { hasText: "fork-e2e" })
+      .getAttribute("value");
+    expect(forkValue).toBeTruthy();
+    await branchSelect.selectOption(forkValue!);
+    await expect(branchSelect).toHaveValue(forkValue!);
+    // Inherited parent strokes keep timeline non-empty on the fork
+    await expect
+      .poll(async () => Number((await host.locator("#scrub").getAttribute("max")) ?? "0"), {
+        timeout: 15000,
+      })
+      .toBeGreaterThan(0);
 
     // Remove GuestTwo — remaining pair still works
     const removeBtn = host
@@ -99,11 +127,20 @@ test.describe("cipherboard flows", () => {
       host.locator(".participant").filter({ hasText: "GuestTwo" }),
     ).toHaveCount(0, { timeout: 10000 });
 
+    // Switch host back to main for post-remove draw (fork may be selected)
+    const mainOpt = branchSelect.locator("option").first();
+    const mainVal = await mainOpt.getAttribute("value");
+    if (mainVal) await branchSelect.selectOption(mainVal);
+
+    const g1Mid = Number((await g1.locator("#scrub").getAttribute("max")) ?? "0");
     await drawStroke(host);
-    await host.waitForTimeout(1000);
-    // GuestOne still has toolbar
+    await expect
+      .poll(async () => Number((await g1.locator("#scrub").getAttribute("max")) ?? "0"), {
+        timeout: 20000,
+      })
+      .toBeGreaterThan(g1Mid);
+
     await expect(g1.getByRole("toolbar", { name: /Drawing tools/i })).toBeVisible();
-    // GuestTwo should not regain board (still waiting/rejected/removed UI)
     await expect(g2.getByRole("toolbar", { name: /Drawing tools/i })).toHaveCount(0, {
       timeout: 5000,
     });

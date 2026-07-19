@@ -6,6 +6,7 @@ pub mod limits;
 pub mod protocol;
 pub mod rate_limit;
 pub mod routes;
+pub mod seq;
 pub mod state;
 pub mod ws;
 

@@ -10,6 +10,7 @@ use tokio::sync::{broadcast, RwLock};
 use crate::config::Config;
 use crate::protocol::ServerMessage;
 use crate::rate_limit::RateLimiter;
+use crate::seq::{effective_branch_high_water, merge_seq_floor};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -21,7 +22,7 @@ pub struct AppState {
     pub sessions: Arc<DashMap<String, Session>>,
     /// per-connection rate limiters keyed by participant_id
     pub rate_limits: Arc<DashMap<String, Arc<RateLimiter>>>,
-    /// room seq counters
+    /// room seq counters: high-water already issued (next = value + 1)
     pub seqs: Arc<RwLock<HashMap<(String, String), u64>>>,
 }
 
@@ -78,38 +79,69 @@ impl AppState {
         }
     }
 
+    /// Load max(MAX direct envelope seq, branch.fork_seq) from Postgres.
+    pub async fn load_branch_high_water(&self, room_id: &str, branch_id: &str) -> u64 {
+        let direct: Option<i64> = sqlx::query_scalar(
+            r#"SELECT MAX(seq) FROM envelopes WHERE room_id = $1 AND branch_id = $2"#,
+        )
+        .bind(room_id)
+        .bind(branch_id)
+        .fetch_one(&self.db)
+        .await
+        .ok()
+        .flatten();
+
+        let fork: Option<i64> = sqlx::query_scalar(
+            r#"SELECT fork_seq FROM branches WHERE room_id = $1 AND id = $2"#,
+        )
+        .bind(room_id)
+        .bind(branch_id)
+        .fetch_optional(&self.db)
+        .await
+        .ok()
+        .flatten()
+        .flatten();
+
+        effective_branch_high_water(
+            direct.map(|v| v as u64),
+            fork.map(|v| v as u64),
+        )
+    }
+
+    /// Issue the next monotonic seq for (room, branch).
+    /// Re-hydrates from envelopes MAX and branches.fork_seq after restart.
     pub async fn next_seq(&self, room_id: &str, branch_id: &str) -> u64 {
         let key = (room_id.to_string(), branch_id.to_string());
+
+        // Fast path: counter already live
         {
             let guard = self.seqs.read().await;
-            if !guard.contains_key(&key) {
+            if guard.contains_key(&key) {
                 drop(guard);
-                let max: Option<i64> = sqlx::query_scalar(
-                    r#"SELECT MAX(seq) FROM envelopes WHERE room_id = $1 AND branch_id = $2"#,
-                )
-                .bind(room_id)
-                .bind(branch_id)
-                .fetch_one(&self.db)
-                .await
-                .ok()
-                .flatten();
                 let mut w = self.seqs.write().await;
-                w.entry(key.clone()).or_insert(max.unwrap_or(0) as u64);
+                let entry = w.entry(key).or_insert(0);
+                *entry += 1;
+                return *entry;
             }
         }
-        let mut guard = self.seqs.write().await;
-        let entry = guard.entry(key).or_insert(0);
+
+        // Slow path: load persisted floor, then merge under write lock (race-safe)
+        let floor = self.load_branch_high_water(room_id, branch_id).await;
+        let mut w = self.seqs.write().await;
+        let entry = w.entry(key).or_insert(0);
+        *entry = merge_seq_floor(*entry, floor);
         *entry += 1;
         *entry
     }
 
     pub async fn ensure_seq_floor(&self, room_id: &str, branch_id: &str, floor: u64) {
+        // Prefer DB-backed floor if higher (e.g. concurrent envelopes)
+        let persisted = self.load_branch_high_water(room_id, branch_id).await;
+        let floor = floor.max(persisted);
         let mut guard = self.seqs.write().await;
         let key = (room_id.to_string(), branch_id.to_string());
         let entry = guard.entry(key).or_insert(0);
-        if *entry < floor {
-            *entry = floor;
-        }
+        *entry = merge_seq_floor(*entry, floor);
     }
 
     pub fn rate_limiter(&self, participant_id: &str) -> Arc<RateLimiter> {

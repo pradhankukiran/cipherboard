@@ -17,6 +17,7 @@ use crate::protocol::{
     BranchPublic, ClientMessage, EnvelopeWire, ParticipantPublic, ServerMessage,
 };
 use crate::routes::{load_branches, load_participants, resolve_session, ParticipantRow};
+use crate::seq::fork_seq_within_parent;
 use crate::state::AppState;
 
 pub const WS_PROTOCOL: &str = "cipherboard";
@@ -599,16 +600,12 @@ async fn handle_client_message(
                 return Err("unknown parent branch".into());
             }
 
-            let parent_max: Option<i64> = sqlx::query_scalar(
-                r#"SELECT MAX(seq) FROM envelopes WHERE room_id = $1 AND branch_id = $2"#,
-            )
-            .bind(room_id)
-            .bind(&parent_branch_id)
-            .fetch_one(&state.db)
-            .await
-            .map_err(|e| e.to_string())?;
-            let parent_max = parent_max.unwrap_or(0) as u64;
-            if fork_seq > parent_max {
+            // Parent effective max = max(direct envelope MAX, parent.fork_seq)
+            // so nested/empty parent forks still accept inherited fork points.
+            let parent_max = state
+                .load_branch_high_water(room_id, &parent_branch_id)
+                .await;
+            if !fork_seq_within_parent(fork_seq, parent_max) {
                 return Err("fork_seq exceeds parent max".into());
             }
 
@@ -629,7 +626,7 @@ async fn handle_client_message(
             .await
             .map_err(|e| e.to_string())?;
 
-            // Child seq starts after fork_seq
+            // Child seq starts after fork_seq (persisted via branches.fork_seq)
             state.ensure_seq_floor(room_id, &id, fork_seq).await;
 
             let branch = BranchPublic {
