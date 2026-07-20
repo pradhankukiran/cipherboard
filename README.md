@@ -261,7 +261,12 @@ cipherboard/
 - **Server availability & policy** (approve, remove, lock, sequencing) are trusted; content confidentiality is not.
 - **Protected lesson is a demo seal**, not a general CMS or multi-tenant lesson store.
 - **No formal memory zeroization guarantees** for freed JS plaintext; server AES key scrubbing is best-effort via `zeroize`.
-- Workspace package metadata declares MIT; **no `LICENSE` file is present in the tree** at the time of writing.
+
+---
+
+## License
+
+Licensed under the [MIT License](LICENSE).
 
 ---
 
