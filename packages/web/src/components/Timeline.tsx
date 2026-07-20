@@ -1,5 +1,11 @@
 import type { Branch, Participant } from "../lib/types";
-import { IconBranch, IconLive } from "./icons";
+import { canStepNext, canStepPrev, stepScrub } from "../lib/scrubStep";
+import {
+  IconBranch,
+  IconChevronLeft,
+  IconChevronRight,
+  IconLive,
+} from "./icons";
 
 export function Timeline(props: {
   maxSeq: number;
@@ -16,6 +22,13 @@ export function Timeline(props: {
   const live = props.scrubSeq === null;
   const value = props.scrubSeq ?? props.maxSeq;
   const scrubMax = Math.max(props.maxSeq, 1);
+  const hasHistory = props.maxSeq > 0;
+  const readout = live
+    ? "Live"
+    : `Event ${value} of ${props.maxSeq}`;
+  const valueText = live
+    ? "Live"
+    : `Sequence ${value} of ${props.maxSeq}`;
 
   return (
     <section
@@ -32,7 +45,7 @@ export function Timeline(props: {
                 <IconLive className="icon-sm" /> Live
               </>
             ) : (
-              <>History · seq {value}</>
+              <>History</>
             )}
           </span>
         </div>
@@ -44,38 +57,81 @@ export function Timeline(props: {
       </div>
 
       <div className="timeline-scrub">
-        <label htmlFor="scrub">Scrub timeline</label>
-        <input
-          id="scrub"
-          type="range"
-          min={0}
-          max={scrubMax}
-          value={value}
-          disabled={props.maxSeq === 0}
-          aria-valuemin={0}
-          aria-valuemax={scrubMax}
-          aria-valuenow={value}
-          aria-valuetext={live ? "Live" : `Sequence ${value} of ${props.maxSeq}`}
-          onChange={(e) => {
-            const v = Number(e.target.value);
-            if (v >= props.maxSeq) props.onScrub(null);
-            else props.onScrub(v);
-          }}
-        />
+        <div className="timeline-scrub-header">
+          <label htmlFor="scrub">Scrub timeline</label>
+          <output
+            className="timeline-readout"
+            htmlFor="scrub"
+            aria-live="polite"
+          >
+            {readout}
+          </output>
+        </div>
+
+        <div className="timeline-scrub-row">
+          <button
+            type="button"
+            className="icon-btn timeline-step"
+            aria-label="Previous event"
+            disabled={!canStepPrev(props.scrubSeq, props.maxSeq)}
+            onClick={() =>
+              props.onScrub(stepScrub(props.scrubSeq, props.maxSeq, "prev"))
+            }
+          >
+            <IconChevronLeft className="icon-sm" />
+          </button>
+
+          <div className="timeline-range-wrap">
+            <input
+              id="scrub"
+              type="range"
+              min={0}
+              max={scrubMax}
+              value={value}
+              disabled={!hasHistory}
+              aria-valuemin={0}
+              aria-valuemax={scrubMax}
+              aria-valuenow={value}
+              aria-valuetext={valueText}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                if (v >= props.maxSeq) props.onScrub(null);
+                else props.onScrub(v);
+              }}
+            />
+            <div className="timeline-endpoints" aria-hidden="true">
+              <span>Beginning</span>
+              <span>Live</span>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            className="icon-btn timeline-step"
+            aria-label="Next event"
+            disabled={!canStepNext(props.scrubSeq, props.maxSeq)}
+            onClick={() =>
+              props.onScrub(stepScrub(props.scrubSeq, props.maxSeq, "next"))
+            }
+          >
+            <IconChevronRight className="icon-sm" />
+          </button>
+        </div>
       </div>
 
       <div className="timeline-controls">
-        <div className="timeline-group" aria-label="Playback">
-          <button
-            type="button"
-            className={live ? undefined : "primary"}
-            onClick={() => props.onScrub(null)}
-            disabled={live}
-          >
-            <IconLive className="icon-sm" />
-            Jump to live
-          </button>
-        </div>
+        {!live && (
+          <div className="timeline-group" aria-label="Playback">
+            <button
+              type="button"
+              className="primary"
+              onClick={() => props.onScrub(null)}
+            >
+              <IconLive className="icon-sm" />
+              Jump to live
+            </button>
+          </div>
+        )}
 
         <div className="timeline-group" aria-label="Filters">
           <label>
@@ -114,7 +170,7 @@ export function Timeline(props: {
           </label>
           <button
             type="button"
-            disabled={props.maxSeq === 0}
+            disabled={!hasHistory}
             onClick={() => {
               const name = window.prompt("Branch name", `fork-${value}`);
               if (name) props.onFork(name, value);

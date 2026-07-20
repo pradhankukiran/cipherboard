@@ -560,11 +560,17 @@
   display: grid;
   gap: var(--space-3);
   min-height: var(--timeline-min-h);
+  min-width: 0;
+}
+
+.timeline[data-mode="live"] {
+  border-top-color: var(--ok);
 }
 
 .timeline[data-mode="history"] {
   background: var(--accent-bg);
   border-top-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 .timeline-header {
@@ -573,6 +579,7 @@
   gap: var(--space-2) var(--space-4);
   align-items: center;
   justify-content: space-between;
+  min-width: 0;
 }
 
 .timeline-title {
@@ -580,6 +587,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
+  min-width: 0;
 }
 
 .timeline-title strong {
@@ -592,14 +600,25 @@
   font-size: var(--text-sm);
   color: var(--muted);
   font-weight: 500;
+  min-width: 0;
 }
 
 .timeline-scrub {
   display: grid;
-  gap: var(--space-1);
+  gap: var(--space-2);
+  min-width: 0;
 }
 
-.timeline-scrub label {
+.timeline-scrub-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.timeline-scrub-header label {
   font-size: var(--text-xs);
   font-weight: 600;
   color: var(--muted);
@@ -607,10 +626,70 @@
   letter-spacing: 0.03em;
 }
 
+.timeline-readout {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--fg);
+  letter-spacing: -0.01em;
+}
+
+.timeline[data-mode="live"] .timeline-readout {
+  color: var(--ok);
+}
+
+.timeline[data-mode="history"] .timeline-readout {
+  color: var(--accent);
+}
+
+.timeline-scrub-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.timeline-step {
+  flex-shrink: 0;
+}
+
+.timeline-range-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.timeline-endpoints {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  user-select: none;
+}
+
+.timeline[data-mode="live"] .timeline-endpoints span:last-child {
+  color: var(--ok);
+}
+
+.timeline[data-mode="history"] .timeline-endpoints span:first-child {
+  color: var(--accent);
+}
+
+/* Custom range track + thumb (desktop + touch hit area) */
 .timeline-scrub input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
   width: 100%;
-  min-height: 2.5rem;
+  height: var(--touch);
+  margin: 0;
+  padding: 0;
   cursor: pointer;
+  background: transparent;
 }
 
 .timeline-scrub input[type="range"]:disabled {
@@ -618,11 +697,101 @@
   opacity: 0.45;
 }
 
+.timeline-scrub input[type="range"]::-webkit-slider-runnable-track {
+  height: 0.375rem;
+  background: var(--border-subtle);
+  border: var(--border-w) solid var(--border);
+  border-radius: var(--radius);
+}
+
+.timeline[data-mode="live"] input[type="range"]::-webkit-slider-runnable-track {
+  background: var(--ok-bg);
+  border-color: var(--ok);
+}
+
+.timeline[data-mode="history"] input[type="range"]::-webkit-slider-runnable-track {
+  background: var(--bg);
+  border-color: var(--accent);
+}
+
+.timeline-scrub input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-top: -0.5rem;
+  background: var(--fg);
+  border: 2px solid var(--bg);
+  border-radius: var(--radius);
+  box-shadow: 0 0 0 1px var(--fg);
+}
+
+.timeline[data-mode="live"] input[type="range"]::-webkit-slider-thumb {
+  background: var(--ok);
+  box-shadow: 0 0 0 1px var(--ok);
+}
+
+.timeline[data-mode="history"] input[type="range"]::-webkit-slider-thumb {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.timeline-scrub input[type="range"]:focus {
+  outline: none;
+}
+
+.timeline-scrub input[type="range"]:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.timeline-scrub input[type="range"]::-moz-range-track {
+  height: 0.375rem;
+  background: var(--border-subtle);
+  border: var(--border-w) solid var(--border);
+  border-radius: var(--radius);
+}
+
+.timeline[data-mode="live"] input[type="range"]::-moz-range-track {
+  background: var(--ok-bg);
+  border-color: var(--ok);
+}
+
+.timeline[data-mode="history"] input[type="range"]::-moz-range-track {
+  background: var(--bg);
+  border-color: var(--accent);
+}
+
+.timeline-scrub input[type="range"]::-moz-range-thumb {
+  width: 1.25rem;
+  height: 1.25rem;
+  background: var(--fg);
+  border: 2px solid var(--bg);
+  border-radius: var(--radius);
+  box-shadow: 0 0 0 1px var(--fg);
+}
+
+.timeline[data-mode="live"] input[type="range"]::-moz-range-thumb {
+  background: var(--ok);
+  box-shadow: 0 0 0 1px var(--ok);
+}
+
+.timeline[data-mode="history"] input[type="range"]::-moz-range-thumb {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.timeline-scrub input[type="range"]:focus-visible::-moz-range-thumb {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
 .timeline-controls {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2) var(--space-3);
   align-items: flex-end;
+  min-width: 0;
 }
 
 .timeline-group {
@@ -632,6 +801,7 @@
   align-items: flex-end;
   padding-right: var(--space-3);
   border-right: var(--border-w) solid var(--border-subtle);
+  min-width: 0;
 }
 
 .timeline-group:last-child {
@@ -647,10 +817,12 @@
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.03em;
+  min-width: 0;
 }
 
 .timeline-group label select {
   min-width: 8rem;
+  max-width: 100%;
   font-weight: 600;
   text-transform: none;
   letter-spacing: 0;
@@ -758,6 +930,20 @@
     padding: var(--space-3);
   }
 
+  .timeline-scrub-row {
+    flex-wrap: wrap;
+  }
+
+  .timeline-range-wrap {
+    order: -1;
+    flex: 1 1 100%;
+  }
+
+  .timeline-step {
+    flex: 1 1 auto;
+    min-width: var(--touch);
+  }
+
   .timeline-group {
     border-right: 0;
     padding-right: 0;
@@ -766,6 +952,10 @@
 
   .timeline-group label,
   .timeline-group label select {
+    width: 100%;
+  }
+
+  .timeline-group button {
     width: 100%;
   }
 
