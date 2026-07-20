@@ -70,8 +70,8 @@ impl Service<Request<Body>> for SpaStatic {
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let path = req.uri().path().to_owned();
-        let mut files = self.files.clone();
-        let mut index = self.index.clone();
+        let files = self.files.clone();
+        let index = self.index.clone();
 
         Box::pin(async move {
             // 1) Try a real file first.
