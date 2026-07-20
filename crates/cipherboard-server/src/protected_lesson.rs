@@ -14,6 +14,7 @@ use rsa::traits::PublicKeyParts;
 use rsa::{BigUint, Oaep, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 use crate::error::{AppError, AppResult};
 use crate::limits::valid_b64;
@@ -28,6 +29,9 @@ const AES_KEY_LEN: usize = 32;
 const IV_LEN: usize = 12;
 /// RSA-OAEP wrap of 32-byte AES key under RSA-2048 yields 256 ciphertext bytes.
 const RSA2048_WRAPPED_KEY_LEN: usize = 256;
+/// Coherent protected-lesson ciphertext bound (plaintext ≤16 KiB).
+pub const MAX_PROTECTED_LESSON_CIPHERTEXT: usize = 32 * 1024;
+pub const MAX_PROTECTED_LESSON_PLAINTEXT: usize = 16 * 1024;
 
 /// Tight body limit for the public seal endpoint (JSON SPKI request).
 pub const SEAL_REQUEST_BODY_LIMIT: usize = 2048;
@@ -82,27 +86,6 @@ pub fn demo_lesson_plaintext() -> Vec<u8> {
     json.as_bytes().to_vec()
 }
 
-/// Best-effort scrub of AES key bytes on all exit paths (not a formal zeroize claim).
-struct AesKeyMaterial([u8; AES_KEY_LEN]);
-
-impl AesKeyMaterial {
-    fn generate() -> Self {
-        let mut key = [0u8; AES_KEY_LEN];
-        rand::thread_rng().fill_bytes(&mut key);
-        Self(key)
-    }
-
-    fn as_slice(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl Drop for AesKeyMaterial {
-    fn drop(&mut self) {
-        self.0.fill(0);
-    }
-}
-
 fn decode_spki_b64(spki_b64: &str) -> AppResult<Vec<u8>> {
     if !valid_b64(spki_b64, MAX_RSA_SPKI_B64) {
         return Err(AppError::BadRequest("invalid rsa_public_key_spki_b64".into()));
@@ -139,14 +122,19 @@ pub fn seal_demo_lesson(rsa_public_key_spki_b64: &str) -> AppResult<SealLessonRe
     let spki = decode_spki_b64(rsa_public_key_spki_b64)?;
     let rsa_pub = parse_and_validate_rsa_public_key(&spki)?;
 
-    let aes_key = AesKeyMaterial::generate();
+    // Best-effort key scrub via zeroize (not a formal zeroization guarantee).
+    let mut aes_key = Zeroizing::new([0u8; AES_KEY_LEN]);
+    rand::thread_rng().fill_bytes(aes_key.as_mut());
     let mut iv = [0u8; IV_LEN];
     rand::thread_rng().fill_bytes(&mut iv);
 
     let plaintext = demo_lesson_plaintext();
+    if plaintext.len() > MAX_PROTECTED_LESSON_PLAINTEXT {
+        return Err(AppError::Internal(anyhow::anyhow!("lesson plaintext bound")));
+    }
     let aad = demo_aad_bytes();
 
-    let cipher = Aes256Gcm::new_from_slice(aes_key.as_slice())
+    let cipher = Aes256Gcm::new_from_slice(aes_key.as_ref())
         .map_err(|_| AppError::Internal(anyhow::anyhow!("aes key init")))?;
     let nonce = Nonce::from_slice(&iv);
     let ciphertext = cipher
@@ -158,15 +146,18 @@ pub fn seal_demo_lesson(rsa_public_key_spki_b64: &str) -> AppResult<SealLessonRe
             },
         )
         .map_err(|_| AppError::Internal(anyhow::anyhow!("aes encrypt")))?;
+    if ciphertext.is_empty() || ciphertext.len() > MAX_PROTECTED_LESSON_CIPHERTEXT {
+        return Err(AppError::Internal(anyhow::anyhow!("ciphertext bound")));
+    }
 
     let padding = Oaep::new::<Sha256>();
     let wrapped = rsa_pub
-        .encrypt(&mut rand::thread_rng(), padding, aes_key.as_slice())
+        .encrypt(&mut rand::thread_rng(), padding, aes_key.as_ref())
         .map_err(|_| AppError::BadRequest("rsa wrap failed".into()))?;
     if wrapped.len() != RSA2048_WRAPPED_KEY_LEN {
         return Err(AppError::Internal(anyhow::anyhow!("wrapped key size")));
     }
-    // aes_key drops here and scrubs via Drop.
+    // aes_key (Zeroizing) drops here and best-effort scrubs.
 
     Ok(SealLessonResponse {
         lesson_id: DEMO_LESSON_ID.into(),

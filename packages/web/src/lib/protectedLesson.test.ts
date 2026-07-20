@@ -117,6 +117,68 @@ describe("protected lesson browser module", () => {
     expect(() => validateLesson({ ...good, steps: [] })).toThrow();
   });
 
+  it("requires dense ordered nonnegative integer step indexes", () => {
+    const stroke = {
+      color: "#0a0a0a",
+      width: 2,
+      points: [
+        { x: 1, y: 2 },
+        { x: 3, y: 4 },
+      ],
+    };
+    const two = {
+      v: 1,
+      id: "demo",
+      title: "Title",
+      steps: [
+        { index: 0, label: "A", strokes: [stroke] },
+        { index: 1, label: "B", strokes: [stroke] },
+      ],
+    };
+    expect(validateLesson(two).steps).toHaveLength(2);
+
+    expect(() =>
+      validateLesson({
+        ...two,
+        steps: [
+          { index: 0, label: "A", strokes: [stroke] },
+          { index: 3, label: "B", strokes: [stroke] },
+        ],
+      }),
+    ).toThrow(/index order/);
+
+    expect(() =>
+      validateLesson({
+        ...two,
+        steps: [
+          { index: 1, label: "A", strokes: [stroke] },
+          { index: 0, label: "B", strokes: [stroke] },
+        ],
+      }),
+    ).toThrow(/index order/);
+
+    expect(() =>
+      validateLesson({
+        ...two,
+        steps: [{ index: -1, label: "A", strokes: [stroke] }],
+      }),
+    ).toThrow(/step index/);
+
+    expect(() =>
+      validateLesson({
+        ...two,
+        steps: [{ index: 1.5, label: "A", strokes: [stroke] }],
+      }),
+    ).toThrow(/step index/);
+
+    expect(() =>
+      validateLesson({
+        ...two,
+        steps: [{ label: "A", strokes: [stroke] }],
+      }),
+    ).toThrow(/step index/);
+  });
+
   it("parseLessonJson rejects oversized payloads", () => {
     const huge = new TextEncoder().encode("x".repeat(20 * 1024));
     expect(() => parseLessonJson(huge.buffer)).toThrow(/bounds/);
@@ -138,7 +200,7 @@ describe("protected lesson browser module", () => {
     expect(() =>
       parseSealResponse({
         lesson_id: "x",
-        demo: "d",
+        demo: "protected-lesson",
         content_alg: "AES-128-GCM",
         key_wrap: "RSA-OAEP-256",
         iv_b64: "aa",
@@ -147,6 +209,18 @@ describe("protected lesson browser module", () => {
         wrapped_key_b64: "dd",
       }),
     ).toThrow(/content_alg/);
+    expect(() =>
+      parseSealResponse({
+        lesson_id: "demo-slope-intro",
+        demo: "other-demo",
+        content_alg: "AES-256-GCM",
+        key_wrap: "RSA-OAEP-256",
+        iv_b64: b64(new Uint8Array(12)),
+        ciphertext_b64: b64(new Uint8Array(32)),
+        aad_b64: b64(new Uint8Array(8)),
+        wrapped_key_b64: b64(new Uint8Array(256)),
+      }),
+    ).toThrow(/demo/);
   });
 
   it("rejects wrong wrapped key length before unwrap", async () => {

@@ -18,14 +18,20 @@ export const AES_LENGTH = 256;
 export const IV_LEN = 12;
 /** RSA-OAEP wrap of AES-256 under RSA-2048. */
 export const WRAPPED_KEY_LEN = 256;
-export const MAX_CIPHERTEXT_BYTES = 96 * 1024;
-export const MAX_AAD_BYTES = 2048;
+/** Coherent protected-lesson size contract (not board-event limits). */
 export const MAX_LESSON_JSON_BYTES = 16 * 1024;
+/** Plaintext ≤16 KiB → ciphertext allowance ~32 KiB (GCM tag + headroom). */
+export const MAX_CIPHERTEXT_BYTES = 32 * 1024;
+export const MAX_AAD_BYTES = 2048;
+/** JSON envelope over b64(ct≤32KiB) + wrap + metadata. */
 export const MAX_SEAL_RESPONSE_BYTES = 48 * 1024;
+export const MAX_CIPHERTEXT_B64_CHARS =
+  Math.ceil((MAX_CIPHERTEXT_BYTES * 4) / 3) + 8;
 export const MAX_STEPS = 16;
 export const MAX_STROKES_PER_STEP = 32;
 export const MAX_POINTS_PER_STROKE = 256;
 export const AAD_PURPOSE = "protected-lesson";
+export const DEMO_MARKER = "protected-lesson";
 
 type WasmApi = {
   decryptProtectedLesson: (
@@ -189,8 +195,8 @@ async function readBoundedText(
 
   if (!res.body || typeof res.body.getReader !== "function") {
     const text = await res.text();
-    // UTF-16 length upper-bounds byte length for ASCII-heavy JSON.
-    if (text.length > maxBytes) {
+    const utf8Bytes = new TextEncoder().encode(text).byteLength;
+    if (utf8Bytes > maxBytes) {
       throw new Error("response too large");
     }
     return text;
@@ -282,7 +288,7 @@ export function parseSealResponse(body: unknown): SealLessonResponse {
   if (typeof lesson_id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(lesson_id)) {
     throw new Error("invalid lesson_id");
   }
-  if (typeof demo !== "string" || !demo || demo.length > 64) {
+  if (demo !== DEMO_MARKER) {
     throw new Error("invalid demo");
   }
   if (content_alg !== "AES-256-GCM") {
@@ -297,7 +303,7 @@ export function parseSealResponse(body: unknown): SealLessonResponse {
     content_alg,
     key_wrap,
     iv_b64: requireB64Field(o, "iv_b64", 64),
-    ciphertext_b64: requireB64Field(o, "ciphertext_b64", Math.ceil((MAX_CIPHERTEXT_BYTES * 4) / 3) + 8),
+    ciphertext_b64: requireB64Field(o, "ciphertext_b64", MAX_CIPHERTEXT_B64_CHARS),
     aad_b64: requireB64Field(o, "aad_b64", 4096),
     wrapped_key_b64: requireB64Field(o, "wrapped_key_b64", 512),
   };
@@ -354,7 +360,19 @@ export function validateLesson(input: unknown): ProtectedLesson {
   const steps: LessonStep[] = o.steps.map((step, i) => {
     if (!step || typeof step !== "object") throw new Error("lesson step");
     const s = step as Record<string, unknown>;
-    const index = typeof s.index === "number" ? s.index : i;
+    if (
+      typeof s.index !== "number" ||
+      !Number.isFinite(s.index) ||
+      !Number.isInteger(s.index) ||
+      s.index < 0
+    ) {
+      throw new Error("lesson step index");
+    }
+    // Replay expects dense ordered steps: index === array position.
+    if (s.index !== i) {
+      throw new Error("lesson step index order");
+    }
+    const index = s.index;
     if (typeof s.label !== "string" || !s.label || s.label.length > 128) {
       throw new Error("lesson step label");
     }

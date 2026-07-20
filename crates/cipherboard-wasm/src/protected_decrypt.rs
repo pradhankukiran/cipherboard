@@ -25,7 +25,8 @@ use web_sys::{AesGcmParams, CryptoKey, SubtleCrypto};
 
 const IV_LEN: u32 = 12;
 const AES_LENGTH_BITS: f64 = 256.0;
-const MAX_CIPHERTEXT_LEN: u32 = 96 * 1024;
+/// Aligned with browser/server protected-lesson contract (not board-event limits).
+const MAX_CIPHERTEXT_LEN: u32 = 32 * 1024;
 const MAX_AAD_LEN: u32 = 2048;
 
 fn err(msg: &str) -> JsValue {
