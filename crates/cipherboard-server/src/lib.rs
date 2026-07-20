@@ -9,6 +9,7 @@ pub mod rate_limit;
 pub mod routes;
 pub mod seq;
 pub mod state;
+pub mod static_files;
 pub mod ws;
 
 #[cfg(test)]

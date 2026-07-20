@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
-use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -11,6 +10,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use cipherboard_server::config::Config;
 use cipherboard_server::routes;
 use cipherboard_server::state::AppState;
+use cipherboard_server::static_files;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -49,8 +49,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn build_router(state: Arc<AppState>, static_dir: PathBuf) -> Router {
-    let index = static_dir.join("index.html");
-    let spa = ServeDir::new(&static_dir).not_found_service(ServeFile::new(index));
+    // fallback (not not_found_service): serve index.html with 200 for SPA routes.
+    let spa = static_files::spa_serve_dir(&static_dir);
 
     Router::new()
         .merge(routes::api_router())
