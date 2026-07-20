@@ -245,42 +245,44 @@ describe("protected lesson fetch wiring", () => {
       wrapped_key_b64: b64(new Uint8Array(256)),
     };
     const text = JSON.stringify(body);
-    const fetchImpl = vi.fn(async () => {
-      return {
-        ok: true,
-        statusText: "OK",
-        headers: {
-          get: (name: string) =>
-            name.toLowerCase() === "content-length"
-              ? String(text.length)
-              : null,
-        },
-        body: {
-          getReader: () => {
-            let done = false;
-            return {
-              read: async () => {
-                if (done) return { done: true, value: undefined };
-                done = true;
-                return {
-                  done: false,
-                  value: new TextEncoder().encode(text),
-                };
-              },
-              cancel: async () => undefined,
-            };
+    const fetchImpl = vi.fn<typeof fetch>(
+      async (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
+        return {
+          ok: true,
+          statusText: "OK",
+          headers: {
+            get: (name: string) =>
+              name.toLowerCase() === "content-length"
+                ? String(text.length)
+                : null,
           },
-        },
-        text: async () => text,
-      } as unknown as Response;
-    });
-    const sealed = await fetchSealedLesson("AAAA", {
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-    });
+          body: {
+            getReader: () => {
+              let done = false;
+              return {
+                read: async () => {
+                  if (done) return { done: true, value: undefined };
+                  done = true;
+                  return {
+                    done: false,
+                    value: new TextEncoder().encode(text),
+                  };
+                },
+                cancel: async () => undefined,
+              };
+            },
+          },
+          text: async () => text,
+        } as unknown as Response;
+      },
+    );
+    const sealed = await fetchSealedLesson("AAAA", { fetchImpl });
     expect(fetchImpl).toHaveBeenCalledOnce();
-    const [url, init] = fetchImpl.mock.calls[0]!;
+    const call = fetchImpl.mock.calls[0];
+    expect(call).toBeDefined();
+    const [url, init] = call;
     expect(url).toBe("/api/demo/protected-lesson");
-    expect((init as RequestInit).method).toBe("POST");
+    expect(init?.method).toBe("POST");
     expect(sealed.lesson_id).toBe("demo-slope-intro");
   });
 
@@ -288,24 +290,24 @@ describe("protected lesson fetch wiring", () => {
     const { fetchSealedLesson, MAX_SEAL_RESPONSE_BYTES } = await import(
       "./protectedLesson"
     );
-    const fetchImpl = vi.fn(async () => {
-      return {
-        ok: true,
-        statusText: "OK",
-        headers: {
-          get: (name: string) =>
-            name.toLowerCase() === "content-length"
-              ? String(MAX_SEAL_RESPONSE_BYTES + 1)
-              : null,
-        },
-        body: null,
-        text: async () => "{}",
-      } as unknown as Response;
-    });
+    const fetchImpl = vi.fn<typeof fetch>(
+      async (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
+        return {
+          ok: true,
+          statusText: "OK",
+          headers: {
+            get: (name: string) =>
+              name.toLowerCase() === "content-length"
+                ? String(MAX_SEAL_RESPONSE_BYTES + 1)
+                : null,
+          },
+          body: null,
+          text: async () => "{}",
+        } as unknown as Response;
+      },
+    );
     await expect(
-      fetchSealedLesson("AAAA", {
-        fetchImpl: fetchImpl as unknown as typeof fetch,
-      }),
+      fetchSealedLesson("AAAA", { fetchImpl }),
     ).rejects.toThrow(/too large/);
   });
 });
