@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn build_router(state: Arc<AppState>, static_dir: PathBuf) -> Router {
-    // fallback (not not_found_service): serve index.html with 200 for SPA routes.
+    // Asset-aware SPA static: navigation → index@200; missing *.js/*.wasm → 404.
     let spa = static_files::spa_serve_dir(&static_dir);
 
     Router::new()
