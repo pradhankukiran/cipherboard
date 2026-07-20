@@ -3,6 +3,7 @@ pub mod config;
 pub mod error;
 pub mod fingerprint;
 pub mod limits;
+pub mod protected_lesson;
 pub mod protocol;
 pub mod rate_limit;
 pub mod routes;

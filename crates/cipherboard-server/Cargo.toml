@@ -36,6 +36,8 @@ base64 = "0.22"
 parking_lot = "0.12"
 mime_guess = "2"
 http = "1"
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+rsa = { version = "0.9", default-features = false, features = ["std", "sha2"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.26"

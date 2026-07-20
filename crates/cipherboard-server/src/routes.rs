@@ -40,7 +40,22 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/rooms", post(create_room))
         .route("/api/rooms/{room_id}/join", post(join_room))
         .route("/api/rooms/{room_id}", get(get_room))
+        .route(
+            "/api/demo/protected-lesson",
+            post(seal_protected_lesson),
+        )
         .route("/ws", get(ws::ws_handler))
+}
+
+/// Seal a static demo lesson to a browser-provided RSA-OAEP public key.
+/// Stateless; no room session required.
+async fn seal_protected_lesson(
+    Json(body): Json<crate::protected_lesson::SealLessonRequest>,
+) -> AppResult<Json<crate::protected_lesson::SealLessonResponse>> {
+    let sealed = crate::protected_lesson::seal_demo_lesson(&body.rsa_public_key_spki_b64)?;
+    // Do not log secrets, plaintext, or key material.
+    tracing::info!(lesson_id = %sealed.lesson_id, "protected lesson sealed");
+    Ok(Json(sealed))
 }
 
 async fn health() -> Json<serde_json::Value> {
