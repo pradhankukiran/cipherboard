@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rand::RngCore;
@@ -35,15 +35,21 @@ fn validate_key_fingerprint(spki: &str, claimed_fp: &str) -> AppResult<String> {
 }
 
 pub fn api_router() -> Router<Arc<AppState>> {
+    let protected_lesson = Router::new()
+        .route(
+            "/api/demo/protected-lesson",
+            post(seal_protected_lesson),
+        )
+        .layer(DefaultBodyLimit::max(
+            crate::protected_lesson::SEAL_REQUEST_BODY_LIMIT,
+        ));
+
     Router::new()
         .route("/health", get(health))
         .route("/api/rooms", post(create_room))
         .route("/api/rooms/{room_id}/join", post(join_room))
         .route("/api/rooms/{room_id}", get(get_room))
-        .route(
-            "/api/demo/protected-lesson",
-            post(seal_protected_lesson),
-        )
+        .merge(protected_lesson)
         .route("/ws", get(ws::ws_handler))
 }
 
