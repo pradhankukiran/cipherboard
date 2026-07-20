@@ -22,6 +22,11 @@ WORKDIR /app
 RUN cargo test --locked -p cipherboard-wasm
 WORKDIR /app/crates/cipherboard-wasm
 RUN wasm-pack build --target web --out-dir /wasm-pkg --release
+COPY packages/web/scripts/audit-protected-lesson-boundary.sh /audit-protected-lesson-boundary.sh
+RUN chmod +x /audit-protected-lesson-boundary.sh \
+ && /audit-protected-lesson-boundary.sh \
+      /app/crates/cipherboard-wasm/src/protected_decrypt.rs \
+      /wasm-pkg/cipherboard_wasm.js
 
 FROM rust-base AS server-build
 WORKDIR /app
@@ -38,7 +43,14 @@ COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/web/package.json ./packages/web/package.json
 RUN pnpm install --frozen-lockfile --filter @cipherboard/web...
 COPY packages/web ./packages/web
+RUN mkdir -p crates/cipherboard-wasm/src
+COPY crates/cipherboard-wasm/src/protected_decrypt.rs ./crates/cipherboard-wasm/src/protected_decrypt.rs
 COPY --from=wasm-test /wasm-pkg ./packages/web/src/wasm/pkg
+WORKDIR /app
+RUN chmod +x packages/web/scripts/audit-protected-lesson-boundary.sh \
+ && packages/web/scripts/audit-protected-lesson-boundary.sh \
+      crates/cipherboard-wasm/src/protected_decrypt.rs \
+      packages/web/src/wasm/pkg/cipherboard_wasm.js
 WORKDIR /app/packages/web
 RUN pnpm exec vitest run
 RUN pnpm exec tsc -b --pretty false

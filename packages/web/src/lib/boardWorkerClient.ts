@@ -10,26 +10,61 @@ let seq = 1;
 const pending = new Map<number, Pending>();
 let initPromise: Promise<void> | null = null;
 
+function rejectAllPending(error: Error): void {
+  const waiters = [...pending.values()];
+  pending.clear();
+  for (const p of waiters) {
+    p.reject(error);
+  }
+}
+
+/** Terminate worker, fail pending calls, and clear init so a later call recovers. */
+function resetWorker(error?: Error): void {
+  if (error) {
+    rejectAllPending(error);
+  } else if (pending.size > 0) {
+    rejectAllPending(new Error("worker reset"));
+  }
+  if (worker) {
+    worker.onmessage = null;
+    worker.onerror = null;
+    worker.onmessageerror = null;
+    try {
+      worker.terminate();
+    } catch {
+      // ignore terminate races
+    }
+    worker = null;
+  }
+  initPromise = null;
+}
+
 function getWorker(): Worker {
   if (!worker) {
     worker = new Worker(new URL("../workers/board-worker.ts", import.meta.url), {
       type: "module",
     });
     worker.onmessage = (ev: MessageEvent) => {
-      const { id, ok, result, error } = ev.data as {
-        id: number;
-        ok: boolean;
+      const data = ev.data as {
+        id?: number;
+        ok?: boolean;
         result?: unknown;
         error?: string;
       };
-      const p = pending.get(id);
+      // Do not log payloads.
+      if (typeof data?.id !== "number") return;
+      const p = pending.get(data.id);
       if (!p) return;
-      pending.delete(id);
-      if (ok) p.resolve(result);
-      else p.reject(new Error(error || "worker error"));
+      pending.delete(data.id);
+      if (data.ok) p.resolve(data.result);
+      else p.reject(new Error(data.error || "worker error"));
     };
     worker.onerror = () => {
-      // do not log payload details
+      // Ownership: fail pending, drop worker, allow later recovery.
+      resetWorker(new Error("worker failure"));
+    };
+    worker.onmessageerror = () => {
+      resetWorker(new Error("worker message error"));
     };
   }
   return worker;
@@ -43,13 +78,29 @@ function call<T>(msg: Record<string, unknown>): Promise<T> {
       resolve: (v) => resolve(v as T),
       reject,
     });
-    w.postMessage({ ...msg, id });
+    try {
+      w.postMessage({ ...msg, id });
+    } catch {
+      pending.delete(id);
+      resetWorker(new Error("worker post failed"));
+      reject(new Error("worker post failed"));
+    }
   });
+}
+
+/** Test seam: force worker teardown without logging. */
+export function resetBoardWorkerForTests(): void {
+  resetWorker(new Error("test reset"));
 }
 
 export async function initBoardWorker(): Promise<void> {
   if (!initPromise) {
-    initPromise = call<{ protocol: number }>({ op: "init" }).then(() => undefined);
+    initPromise = call<{ protocol: number }>({ op: "init" })
+      .then(() => undefined)
+      .catch((e: unknown) => {
+        initPromise = null;
+        throw e instanceof Error ? e : new Error("worker init failed");
+      });
   }
   return initPromise;
 }

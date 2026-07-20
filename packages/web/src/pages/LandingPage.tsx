@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { generateIdentity } from "../crypto/keys";
 import { saveIdentity } from "../crypto/keystore";
 import { createRoom, joinRoom, readInviteFragment } from "../lib/api";
@@ -250,6 +250,11 @@ export function LandingPage() {
         <p className="landing-footnote">
           Safety codes are cryptographic fingerprints, not proof of real-world
           identity until you verify them through a channel you trust.
+        </p>
+
+        <p className="landing-demo-link">
+          <Link to="/demo/protected-lesson">Protected Lesson Replay</Link>
+          <span className="muted"> — server-sealed demo, Wasm decrypt boundary</span>
         </p>
       </main>
     </div>
