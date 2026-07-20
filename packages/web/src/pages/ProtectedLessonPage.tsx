@@ -49,24 +49,41 @@ function paintLesson(
   }
 }
 
+function isAbortError(e: unknown): boolean {
+  if (!e || typeof e !== "object") return false;
+  const name = (e as { name?: string }).name;
+  return name === "AbortError";
+}
+
 export function ProtectedLessonPage() {
   const [status, setStatus] = useState<Status>("loading");
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<LoadProtectedLessonResult | null>(null);
   const [stepIdx, setStepIdx] = useState(0);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const loadRev = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+    const rev = ++loadRev.current;
+
     setStatus("loading");
     setError(null);
     setResult(null);
     setStepIdx(0);
+
     try {
-      const loaded = await loadProtectedLesson();
+      const loaded = await loadProtectedLesson({ signal: ac.signal });
+      if (rev !== loadRev.current) return;
       setResult(loaded);
       setStepIdx(0);
       setStatus("ready");
     } catch (e) {
+      if (rev !== loadRev.current) return;
+      if (ac.signal.aborted || isAbortError(e)) return;
       setError(e instanceof Error ? e.message : String(e));
       setStatus("error");
     }
@@ -74,6 +91,10 @@ export function ProtectedLessonPage() {
 
   useEffect(() => {
     void load();
+    return () => {
+      loadRev.current += 1;
+      abortRef.current?.abort();
+    };
   }, [load]);
 
   useEffect(() => {
@@ -122,7 +143,7 @@ export function ProtectedLessonPage() {
         ) : null}
 
         {status === "error" ? (
-          <div className="error-box" role="alert">
+          <div className="error-box" role="alert" data-testid="protected-lesson-error">
             <p>{error ?? "Failed to load protected lesson."}</p>
             <div className="actions">
               <button type="button" className="primary" onClick={() => void load()}>
@@ -150,6 +171,12 @@ export function ProtectedLessonPage() {
                   </dd>
                 </div>
                 <div>
+                  <dt>RSA private usages</dt>
+                  <dd data-testid="audit-rsa-usages">
+                    {result.audit.rsaPrivateUsages.join(", ") || "(none)"}
+                  </dd>
+                </div>
+                <div>
                   <dt>AES content key extractable</dt>
                   <dd data-testid="audit-aes-extractable">
                     {String(result.audit.aesExtractable)}
@@ -159,6 +186,12 @@ export function ProtectedLessonPage() {
                   <dt>AES usages</dt>
                   <dd data-testid="audit-aes-usages">
                     {result.audit.aesUsages.join(", ") || "(none)"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>AES export attempt</dt>
+                  <dd data-testid="audit-aes-export">
+                    {result.audit.aesExportAttempt}
                   </dd>
                 </div>
                 <div>
@@ -183,7 +216,7 @@ export function ProtectedLessonPage() {
               <p className="protected-lesson-audit-note">
                 AES key bytes never enter Wasm linear memory. Plaintext is returned
                 as a JS ArrayBuffer from SubtleCrypto; it does exist briefly in JS
-                for decode and paint.
+                for decode and paint. Content keys are not retained after load.
               </p>
             </section>
 
@@ -197,7 +230,9 @@ export function ProtectedLessonPage() {
                   Step {stepIdx + 1} of {steps.length}
                   {current ? ` — ${current.label}` : ""}
                 </p>
-                {current?.note ? <p className="protected-lesson-note">{current.note}</p> : null}
+                {current?.note ? (
+                  <p className="protected-lesson-note">{current.note}</p>
+                ) : null}
               </div>
 
               <div className="protected-lesson-canvas-wrap">

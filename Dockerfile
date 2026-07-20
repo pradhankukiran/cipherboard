@@ -50,7 +50,8 @@ WORKDIR /app
 RUN chmod +x packages/web/scripts/audit-protected-lesson-boundary.sh \
  && packages/web/scripts/audit-protected-lesson-boundary.sh \
       crates/cipherboard-wasm/src/protected_decrypt.rs \
-      packages/web/src/wasm/pkg/cipherboard_wasm.js
+      packages/web/src/wasm/pkg/cipherboard_wasm.js \
+      packages/web/src/lib/protectedLesson.ts
 WORKDIR /app/packages/web
 RUN pnpm exec vitest run
 RUN pnpm exec tsc -b --pretty false

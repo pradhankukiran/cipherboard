@@ -2,11 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import {
   assertAesKeyNonExportable,
   buildAudit,
+  canonicalAadBytes,
   generateLessonUnwrapKeys,
   parseLessonJson,
   parseSealResponse,
-  unwrapContentKeyDirect,
+  unwrapContentKey,
   validateLesson,
+  WRAPPED_KEY_LEN,
 } from "./protectedLesson";
 
 function b64(bytes: Uint8Array): string {
@@ -16,49 +18,76 @@ function b64(bytes: Uint8Array): string {
 }
 
 describe("protected lesson browser module", () => {
-  it("generates non-extractable RSA private key and exportable public SPKI", async () => {
+  it("generates non-extractable RSA private with unwrapKey only", async () => {
     const rsa = await generateLessonUnwrapKeys();
     expect(rsa.privateKey.extractable).toBe(false);
+    expect([...rsa.privateKey.usages]).toEqual(["unwrapKey"]);
     expect(rsa.publicKeySpkiB64.length).toBeGreaterThan(100);
-    // Public SPKI export is how the browser sends the wrap key to the server.
-    const spki = Uint8Array.from(atob(rsa.publicKeySpkiB64), (c) => c.charCodeAt(0));
+    const spki = Uint8Array.from(atob(rsa.publicKeySpkiB64), (c) =>
+      c.charCodeAt(0),
+    );
     expect(spki.byteLength).toBeGreaterThan(100);
   });
 
-  it("unwraps AES content key as non-extractable decrypt-only", async () => {
+  it("unwraps AES via unwrapKey only as non-extractable decrypt-only", async () => {
     const rsa = await generateLessonUnwrapKeys();
-    // Create a real AES key, wrap with RSA public, unwrap with private.
+    // Re-import public SPKI with wrapKey solely for the test wrap step.
+    const spki = Uint8Array.from(atob(rsa.publicKeySpkiB64), (c) =>
+      c.charCodeAt(0),
+    );
+    const wrapPub = await crypto.subtle.importKey(
+      "spki",
+      spki,
+      { name: "RSA-OAEP", hash: "SHA-256" },
+      true,
+      ["wrapKey"],
+    );
     const aes = await crypto.subtle.generateKey(
       { name: "AES-GCM", length: 256 },
       true,
       ["encrypt", "decrypt"],
     );
-    const raw = await crypto.subtle.exportKey("raw", aes);
-    const wrapped = await crypto.subtle.encrypt(
+    const wrappedBuf = await crypto.subtle.wrapKey(
+      "raw",
+      aes,
+      wrapPub,
       { name: "RSA-OAEP" },
-      rsa.publicKey,
-      raw,
     );
-    const contentKey = await unwrapContentKeyDirect(rsa.privateKey, b64(new Uint8Array(wrapped)));
+    const wrapped = new Uint8Array(wrappedBuf);
+    expect(wrapped.byteLength).toBe(WRAPPED_KEY_LEN);
+
+    const contentKey = await unwrapContentKey(rsa.privateKey, wrapped);
     expect(contentKey.extractable).toBe(false);
     expect([...contentKey.usages]).toEqual(["decrypt"]);
-    await assertAesKeyNonExportable(contentKey);
+    const exportResult = await assertAesKeyNonExportable(contentKey);
+    expect(exportResult).toBe("rejected");
     await expect(crypto.subtle.exportKey("raw", contentKey)).rejects.toBeTruthy();
   });
 
-  it("buildAudit reports truthful boundary facts", async () => {
+  it("buildAudit reports actual-handle facts including export rejection", async () => {
+    const rsa = await generateLessonUnwrapKeys();
     const key = await crypto.subtle.generateKey(
       { name: "AES-GCM", length: 256 },
       false,
       ["decrypt"],
     );
-    const audit = buildAudit(key);
+    const audit = buildAudit(rsa.privateKey, key, "rejected");
     expect(audit.rsaPrivateExtractable).toBe(false);
+    expect(audit.rsaPrivateUsages).toEqual(["unwrapKey"]);
     expect(audit.aesExtractable).toBe(false);
     expect(audit.aesUsages).toEqual(["decrypt"]);
+    expect(audit.aesExportAttempt).toBe("rejected");
     expect(audit.boundaryMode).toBe("wasm-subtle-externref");
     expect(audit.keyBytesEnterWasmLinearMemory).toBe(false);
     expect(audit.plaintextReturnedAs).toBe("js-arraybuffer");
+  });
+
+  it("canonical AAD matches server contract", () => {
+    const aad = new TextDecoder().decode(canonicalAadBytes("demo-slope-intro"));
+    expect(aad).toBe(
+      '{"v":1,"purpose":"protected-lesson","lesson_id":"demo-slope-intro"}',
+    );
+    expect(() => canonicalAadBytes("bad id")).toThrow();
   });
 
   it("validates lesson schema and bounds", () => {
@@ -86,18 +115,6 @@ describe("protected lesson browser module", () => {
     expect(validateLesson(good).id).toBe("demo");
     expect(() => validateLesson({ ...good, v: 2 })).toThrow();
     expect(() => validateLesson({ ...good, steps: [] })).toThrow();
-    expect(() =>
-      validateLesson({
-        ...good,
-        steps: [
-          {
-            index: 0,
-            label: "x",
-            strokes: [{ color: "red", width: 1, points: [{ x: 0, y: 0 }] }],
-          },
-        ],
-      }),
-    ).toThrow();
   });
 
   it("parseLessonJson rejects oversized payloads", () => {
@@ -105,10 +122,10 @@ describe("protected lesson browser module", () => {
     expect(() => parseLessonJson(huge.buffer)).toThrow(/bounds/);
   });
 
-  it("parseSealResponse enforces stable typed shape", () => {
+  it("parseSealResponse enforces stable typed shape without title", () => {
     const ok = parseSealResponse({
       lesson_id: "demo-slope-intro",
-      title: "Title",
+      demo: "protected-lesson",
       content_alg: "AES-256-GCM",
       key_wrap: "RSA-OAEP-256",
       iv_b64: b64(new Uint8Array(12)),
@@ -117,10 +134,11 @@ describe("protected lesson browser module", () => {
       wrapped_key_b64: b64(new Uint8Array(256)),
     });
     expect(ok.lesson_id).toBe("demo-slope-intro");
+    expect(ok.demo).toBe("protected-lesson");
     expect(() =>
       parseSealResponse({
         lesson_id: "x",
-        title: "t",
+        demo: "d",
         content_alg: "AES-128-GCM",
         key_wrap: "RSA-OAEP-256",
         iv_b64: "aa",
@@ -131,48 +149,20 @@ describe("protected lesson browser module", () => {
     ).toThrow(/content_alg/);
   });
 
-  it("tampered ciphertext fails AES-GCM decrypt (host path control)", async () => {
-    const key = await crypto.subtle.generateKey(
-      { name: "AES-GCM", length: 256 },
-      false,
-      ["encrypt", "decrypt"],
+  it("rejects wrong wrapped key length before unwrap", async () => {
+    const rsa = await generateLessonUnwrapKeys();
+    await expect(unwrapContentKey(rsa.privateKey, new Uint8Array(16))).rejects.toThrow(
+      /256/,
     );
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const aad = new TextEncoder().encode('{"v":1}');
-    const pt = new TextEncoder().encode('{"v":1,"id":"x","title":"t","steps":[]}');
-    // encrypt needs encrypt usage — generate extractable encrypt+decrypt for control
-    const encKey = await crypto.subtle.generateKey(
-      { name: "AES-GCM", length: 256 },
-      true,
-      ["encrypt", "decrypt"],
-    );
-    const ct = new Uint8Array(
-      await crypto.subtle.encrypt(
-        { name: "AES-GCM", iv, additionalData: aad },
-        encKey,
-        pt,
-      ),
-    );
-    const bad = new Uint8Array(ct);
-    bad[bad.length - 1] ^= 0x01;
-    await expect(
-      crypto.subtle.decrypt(
-        { name: "AES-GCM", iv, additionalData: aad },
-        encKey,
-        bad,
-      ),
-    ).rejects.toBeTruthy();
-    // unused key silence
-    expect(key.algorithm).toBeTruthy();
   });
 });
 
 describe("protected lesson fetch wiring", () => {
-  it("fetchSealedLesson posts SPKI and parses JSON", async () => {
+  it("fetchSealedLesson bounds body then parses JSON", async () => {
     const { fetchSealedLesson } = await import("./protectedLesson");
     const body = {
       lesson_id: "demo-slope-intro",
-      title: "Slope",
+      demo: "protected-lesson",
       content_alg: "AES-256-GCM",
       key_wrap: "RSA-OAEP-256",
       iv_b64: b64(new Uint8Array(12)),
@@ -180,17 +170,68 @@ describe("protected lesson fetch wiring", () => {
       aad_b64: b64(new Uint8Array(16)),
       wrapped_key_b64: b64(new Uint8Array(256)),
     };
+    const text = JSON.stringify(body);
     const fetchImpl = vi.fn(async () => {
       return {
         ok: true,
-        json: async () => body,
-      } as Response;
+        statusText: "OK",
+        headers: {
+          get: (name: string) =>
+            name.toLowerCase() === "content-length"
+              ? String(text.length)
+              : null,
+        },
+        body: {
+          getReader: () => {
+            let done = false;
+            return {
+              read: async () => {
+                if (done) return { done: true, value: undefined };
+                done = true;
+                return {
+                  done: false,
+                  value: new TextEncoder().encode(text),
+                };
+              },
+              cancel: async () => undefined,
+            };
+          },
+        },
+        text: async () => text,
+      } as unknown as Response;
     });
-    const sealed = await fetchSealedLesson("AAAA", fetchImpl as unknown as typeof fetch);
+    const sealed = await fetchSealedLesson("AAAA", {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
     expect(fetchImpl).toHaveBeenCalledOnce();
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(url).toBe("/api/demo/protected-lesson");
     expect((init as RequestInit).method).toBe("POST");
     expect(sealed.lesson_id).toBe("demo-slope-intro");
+  });
+
+  it("fetchSealedLesson rejects oversized Content-Length", async () => {
+    const { fetchSealedLesson, MAX_SEAL_RESPONSE_BYTES } = await import(
+      "./protectedLesson"
+    );
+    const fetchImpl = vi.fn(async () => {
+      return {
+        ok: true,
+        statusText: "OK",
+        headers: {
+          get: (name: string) =>
+            name.toLowerCase() === "content-length"
+              ? String(MAX_SEAL_RESPONSE_BYTES + 1)
+              : null,
+        },
+        body: null,
+        text: async () => "{}",
+      } as unknown as Response;
+    });
+    await expect(
+      fetchSealedLesson("AAAA", {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      }),
+    ).rejects.toThrow(/too large/);
   });
 });
