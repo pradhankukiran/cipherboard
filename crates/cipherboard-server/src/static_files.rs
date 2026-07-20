@@ -18,9 +18,8 @@ use std::task::{Context, Poll};
 use axum::body::Body;
 use bytes::Bytes;
 use http::{Request, Response, StatusCode};
-use tower::ServiceExt;
+use tower::{Service, ServiceExt};
 use tower_http::services::{ServeDir, ServeFile};
-use tower_service::Service;
 
 /// True when the request path looks like a static asset (extension-bearing file).
 ///
