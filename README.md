@@ -4,11 +4,6 @@
 
 Cipherboard is a full-stack portfolio system for **end-to-end encrypted collaborative drawing**, host-controlled rooms, private timeline scrubbing, and a production-quality **Protected Lesson Replay** showcase of the browser WebCrypto ↔ Rust/Wasm boundary.
 
-| | |
-|---|---|
-| **Live app** | [https://cipherboard.up.railway.app](https://cipherboard.up.railway.app) |
-| **Protected Lesson Replay** | [https://cipherboard.up.railway.app/demo/protected-lesson](https://cipherboard.up.railway.app/demo/protected-lesson) |
-
 ---
 
 ## Why it exists
