@@ -4,14 +4,6 @@
 
 Cipherboard is a full-stack portfolio system for **end-to-end encrypted collaborative drawing**, host-controlled rooms, private timeline scrubbing, and a production-quality **Protected Lesson Replay** showcase of the browser WebCrypto ↔ Rust/Wasm boundary.
 
-[![Live demo](https://img.shields.io/badge/demo-live-0d5c2e?style=flat-square)](https://cipherboard.up.railway.app)
-[![Rust](https://img.shields.io/badge/Rust-1.88-dea584?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![React](https://img.shields.io/badge/React-19-61dafb?style=flat-square&logo=react&logoColor=black)](https://react.dev/)
-[![WebAssembly](https://img.shields.io/badge/WebAssembly-wasm--bindgen-654ff0?style=flat-square&logo=webassembly&logoColor=white)](https://webassembly.org/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-sqlx-4169e1?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![Railway](https://img.shields.io/badge/Deploy-Railway-0B0D0E?style=flat-square&logo=railway&logoColor=white)](https://railway.app/)
-
 | | |
 |---|---|
 | **Live app** | [https://cipherboard.up.railway.app](https://cipherboard.up.railway.app) |
